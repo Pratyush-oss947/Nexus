@@ -12,11 +12,40 @@ import { AgentEngine, AgentEvent } from './agentEngine';
 import { OllamaService } from './ollamaService';
 import { ElevenLabsService } from './elevenLabsService';
 
-// Load environment variables from .env if present
-dotenv.config();
+// Standardize application name so userData path is deterministic across dev & packaged builds
+app.setName('nexus-ai');
 
 // Ensure audio playback is never blocked by Chromium autoplay restrictions
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+// Comprehensive multi-path .env loader
+function loadEnvironmentVariables(): string | null {
+  const possiblePaths = [
+    path.join(process.cwd(), '.env'),
+    path.join(__dirname, '..', '.env'),
+    path.join(__dirname, '..', '..', '.env'),
+    path.join(path.dirname(process.execPath), '.env'),
+    path.join(process.resourcesPath || '', '.env'),
+    path.join(app.getPath('userData'), '.env'),
+    'C:\\Users\\Home\\.gemini\\antigravity\\scratch\\nexus-ai\\.env',
+  ];
+
+  for (const p of possiblePaths) {
+    try {
+      if (fs.existsSync(p)) {
+        dotenv.config({ path: p, override: false });
+        console.log(`[NEXUS ENV] Successfully loaded environment from: ${p}`);
+        return p;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  console.warn('[NEXUS ENV] Notice: No external .env file located; relying on process environment and persistent config.');
+  return null;
+}
+
+loadEnvironmentVariables();
 
 let mainWindow: BrowserWindow | null = null;
 let activeAbortController: AbortController | null = null;
@@ -30,11 +59,17 @@ const getUserDataPath = (filename: string) => {
 async function readJsonFile<T>(filename: string, defaultValue: T): Promise<T> {
   try {
     const filePath = getUserDataPath(filename);
-    if (!fs.existsSync(filePath)) {
-      return defaultValue;
+    if (fs.existsSync(filePath)) {
+      const data = await fs.promises.readFile(filePath, 'utf-8');
+      return JSON.parse(data) as T;
     }
-    const data = await fs.promises.readFile(filePath, 'utf-8');
-    return JSON.parse(data) as T;
+    // Also check standard nexus-ai directory if app.getPath('userData') resolved to a different folder
+    const fallbackPath = path.join('C:\\Users\\Home\\AppData\\Roaming\\nexus-ai', filename);
+    if (fs.existsSync(fallbackPath)) {
+      const data = await fs.promises.readFile(fallbackPath, 'utf-8');
+      return JSON.parse(data) as T;
+    }
+    return defaultValue;
   } catch (err) {
     console.error(`Error reading ${filename}:`, err);
     return defaultValue;
@@ -44,6 +79,7 @@ async function readJsonFile<T>(filename: string, defaultValue: T): Promise<T> {
 async function writeJsonFile<T>(filename: string, data: T): Promise<boolean> {
   try {
     const filePath = getUserDataPath(filename);
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
     await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
     return true;
   } catch (err) {
@@ -59,12 +95,12 @@ let cachedOllamaApiKey = process.env.OLLAMA_API_KEY || '';
 async function getEffectiveApiKey(): Promise<string> {
   if (cachedApiKey) return cachedApiKey;
   if (process.env.GEMINI_API_KEY) {
-    cachedApiKey = process.env.GEMINI_API_KEY;
+    cachedApiKey = process.env.GEMINI_API_KEY.trim();
     return cachedApiKey;
   }
   const config = await readJsonFile<{ apiKey?: string }>('nexus_config.json', {});
-  if (config.apiKey) {
-    cachedApiKey = config.apiKey;
+  if (config.apiKey && config.apiKey.trim()) {
+    cachedApiKey = config.apiKey.trim();
     return cachedApiKey;
   }
   return '';
@@ -73,12 +109,12 @@ async function getEffectiveApiKey(): Promise<string> {
 async function getEffectiveOllamaApiKey(): Promise<string> {
   if (cachedOllamaApiKey) return cachedOllamaApiKey;
   if (process.env.OLLAMA_API_KEY) {
-    cachedOllamaApiKey = process.env.OLLAMA_API_KEY;
+    cachedOllamaApiKey = process.env.OLLAMA_API_KEY.trim();
     return cachedOllamaApiKey;
   }
   const config = await readJsonFile<{ ollamaApiKey?: string; apiKey?: string }>('nexus_config.json', {});
-  if (config.ollamaApiKey) {
-    cachedOllamaApiKey = config.ollamaApiKey;
+  if (config.ollamaApiKey && config.ollamaApiKey.trim()) {
+    cachedOllamaApiKey = config.ollamaApiKey.trim();
     return cachedOllamaApiKey;
   }
   return '';
@@ -89,16 +125,30 @@ let cachedElevenLabsVoiceId = process.env.ELEVENLABS_VOICE_ID || '';
 let cachedElevenLabsModel = process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
 
 async function getEffectiveElevenLabsConfig(): Promise<{ apiKey: string; voiceId: string; model: string }> {
-  let apiKey = cachedElevenLabsApiKey || process.env.ELEVENLABS_API_KEY || '';
-  let voiceId = cachedElevenLabsVoiceId || process.env.ELEVENLABS_VOICE_ID || '';
-  let model = cachedElevenLabsModel || process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
+  let apiKey = (process.env.ELEVENLABS_API_KEY || cachedElevenLabsApiKey || '').trim();
+  let voiceId = (process.env.ELEVENLABS_VOICE_ID || cachedElevenLabsVoiceId || '').trim();
+  let model = (process.env.ELEVENLABS_MODEL || cachedElevenLabsModel || 'eleven_multilingual_v2').trim();
 
   if (!apiKey || !voiceId) {
     const config = await readJsonFile<Record<string, any>>('nexus_config.json', {});
-    if (!apiKey && config.elevenLabsApiKey) apiKey = config.elevenLabsApiKey;
-    if (!voiceId && config.elevenLabsVoiceId) voiceId = config.elevenLabsVoiceId;
-    if (config.elevenLabsModel) model = config.elevenLabsModel;
+    if (!apiKey && config.elevenLabsApiKey) apiKey = config.elevenLabsApiKey.trim();
+    if (!voiceId && config.elevenLabsVoiceId) voiceId = config.elevenLabsVoiceId.trim();
+    if (config.elevenLabsModel && config.elevenLabsModel.trim()) model = config.elevenLabsModel.trim();
   }
+
+  // Final hard fallback directly to project .env if running from packaged build
+  if (!apiKey || !voiceId) {
+    const fallbackEnvPath = 'C:\\Users\\Home\\.gemini\\antigravity\\scratch\\nexus-ai\\.env';
+    if (fs.existsSync(fallbackEnvPath)) {
+      try {
+        const parsed = dotenv.parse(fs.readFileSync(fallbackEnvPath, 'utf-8'));
+        if (!apiKey && parsed.ELEVENLABS_API_KEY) apiKey = parsed.ELEVENLABS_API_KEY.trim();
+        if (!voiceId && parsed.ELEVENLABS_VOICE_ID) voiceId = parsed.ELEVENLABS_VOICE_ID.trim();
+        if (parsed.ELEVENLABS_MODEL) model = parsed.ELEVENLABS_MODEL.trim();
+      } catch {}
+    }
+  }
+
   return { apiKey, voiceId, model };
 }
 

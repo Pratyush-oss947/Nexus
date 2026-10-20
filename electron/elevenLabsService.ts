@@ -276,6 +276,7 @@ export class ElevenLabsService {
     const model = (options?.modelId || this.model || 'eleven_multilingual_v2').trim();
 
     if (!key) {
+      console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'MISSING_CREDENTIALS', message: 'ElevenLabs API key is not configured.' })}`);
       return {
         success: false,
         error: 'ElevenLabs API key is not configured. Add ELEVENLABS_API_KEY to your .env file or Settings.',
@@ -283,6 +284,7 @@ export class ElevenLabsService {
     }
 
     if (!voice) {
+      console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'MISSING_CREDENTIALS', message: 'ElevenLabs Voice ID is not configured.' })}`);
       return {
         success: false,
         error: 'ElevenLabs Voice ID is not configured. Add ELEVENLABS_VOICE_ID to your .env file or Settings.',
@@ -352,6 +354,10 @@ export class ElevenLabsService {
     model: string,
     signal: AbortSignal
   ): Promise<{ success: boolean; audioBase64?: string; error?: string; status?: string }> {
+    const startTime = Date.now();
+    const snippet = chunkText.slice(0, 60).replace(/\s+/g, ' ');
+    console.log(`[TTS_REQUEST_STARTED] ${JSON.stringify({ voiceId: voice, model, textChars: chunkText.length, snippet })}`);
+
     try {
       const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}`, {
         method: 'POST',
@@ -373,6 +379,9 @@ export class ElevenLabsService {
         signal,
       });
 
+      const durationMs = Date.now() - startTime;
+      console.log(`[TTS_API_RESPONSE] ${JSON.stringify({ status: res.status, ok: res.ok, durationMs })}`);
+
       if (!res.ok) {
         let errJson: any = null;
         try {
@@ -381,10 +390,12 @@ export class ElevenLabsService {
           errJson = null;
         }
         const parsed = this.parseApiError(res.status, errJson, voice);
+        console.error(`[TTS_ERROR] ${JSON.stringify({ category: parsed.category, status: res.status, message: parsed.error })}`);
         return { success: false, error: parsed.error, status: String(res.status) };
       }
 
       const arrayBuffer = await res.arrayBuffer();
+      console.log(`[TTS_AUDIO_RECEIVED] ${JSON.stringify({ byteCount: arrayBuffer.byteLength, format: 'audio/mpeg' })}`);
       const base64 = Buffer.from(arrayBuffer).toString('base64');
 
       return {
@@ -393,8 +404,10 @@ export class ElevenLabsService {
       };
     } catch (err: any) {
       if (err.name === 'AbortError') {
+        console.log(`[TTS_CANCELLED] Speech synthesis request cancelled.`);
         return { success: false, error: 'Speech synthesis cancelled.' };
       }
+      console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'NETWORK_ERROR', message: err.message || String(err) })}`);
       return { success: false, error: `Speech synthesis failed: ${err.message || String(err)}` };
     }
   }
@@ -410,7 +423,7 @@ export class ElevenLabsService {
     status: number,
     errData: any,
     voice: string
-  ): { success: false; error: string } {
+  ): { success: false; error: string; category: string } {
     const detail = errData?.detail;
     const msg = detail?.message || errData?.message || '';
     const errStatus = detail?.status || '';
@@ -419,11 +432,13 @@ export class ElevenLabsService {
       if (errStatus === 'missing_permissions' || msg.includes('permission')) {
         return {
           success: false,
+          category: 'MISSING_PERMISSIONS',
           error: `ElevenLabs API key is missing required permissions: "${msg}". Please visit ElevenLabs Dashboard -> API Keys and grant the "Text to Speech" permission (or generate a key with default permissions).`,
         };
       }
       return {
         success: false,
+        category: 'INVALID_CREDENTIALS',
         error: 'Invalid ElevenLabs API key. Please check ELEVENLABS_API_KEY in .env or Settings.',
       };
     }
@@ -431,6 +446,7 @@ export class ElevenLabsService {
     if (status === 404) {
       return {
         success: false,
+        category: 'VOICE_NOT_FOUND',
         error: `ElevenLabs voice ID "${voice}" was not found. Please verify ELEVENLABS_VOICE_ID in .env or Settings.`,
       };
     }
@@ -438,12 +454,14 @@ export class ElevenLabsService {
     if (status === 429) {
       return {
         success: false,
+        category: 'RATE_LIMIT',
         error: 'ElevenLabs rate limit or quota exceeded. Please check your ElevenLabs account credits.',
       };
     }
 
     return {
       success: false,
+      category: 'API_ERROR',
       error: msg || `ElevenLabs API returned HTTP error ${status}.`,
     };
   }

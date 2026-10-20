@@ -231,9 +231,10 @@ export const App: React.FC = () => {
 
         persistMessages([...updatedMessages, modelMsg]);
 
-        // Speak final assistant response aloud if voice mode is enabled
-        if (voiceService.isEnabled()) {
-          voiceService.speak(modelMsg.text, modelMsg.id);
+        // Automatically speak final assistant response if voice is enabled or requested
+        const promptRequestedSpeech = /\b(speak|talk|read aloud|say aloud|voice)\b/i.test(text);
+        if (voiceService.isEnabled() || promptRequestedSpeech) {
+          voiceService.speak(modelMsg.text, modelMsg.id, promptRequestedSpeech);
         }
       }
     } catch (err: any) {

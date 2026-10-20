@@ -16,6 +16,8 @@ export class VoiceService {
   private lastErrorMessage: string | null = null;
 
   private currentAudioElement: HTMLAudioElement | null = null;
+  private currentSourceNode: AudioBufferSourceNode | null = null;
+  private audioContext: AudioContext | null = null;
   private playbackGenerationId: number = 0;
   private listeners: Set<(state: VoiceState) => void> = new Set();
 
@@ -28,6 +30,43 @@ export class VoiceService {
     } catch {
       this.isVoiceEnabled = true;
     }
+
+    this.setupAudioContextUnlock();
+  }
+
+  private setupAudioContextUnlock(): void {
+    if (typeof window === 'undefined') return;
+
+    const unlock = () => {
+      try {
+        const ctx = this.getOrCreateAudioContext();
+        if (ctx && ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
+        }
+      } catch {}
+      window.removeEventListener('click', unlock);
+      window.removeEventListener('keydown', unlock);
+      window.removeEventListener('pointerdown', unlock);
+    };
+
+    window.addEventListener('click', unlock, { once: true, passive: true });
+    window.addEventListener('keydown', unlock, { once: true, passive: true });
+    window.addEventListener('pointerdown', unlock, { once: true, passive: true });
+  }
+
+  private getOrCreateAudioContext(): AudioContext | null {
+    if (typeof window === 'undefined') return null;
+    if (!this.audioContext) {
+      try {
+        const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtxClass) {
+          this.audioContext = new AudioCtxClass();
+        }
+      } catch (err) {
+        console.warn('[NEXUS Voice] Failed to create AudioContext:', err);
+      }
+    }
+    return this.audioContext;
   }
 
   public getState(): VoiceState {
@@ -88,21 +127,29 @@ export class VoiceService {
     // Invalidate any ongoing playback sequence
     this.playbackGenerationId++;
 
+    // 1. Stop Web Audio source node
+    if (this.currentSourceNode) {
+      try {
+        this.currentSourceNode.stop();
+        this.currentSourceNode.disconnect();
+      } catch {}
+      this.currentSourceNode = null;
+    }
+
+    // 2. Stop HTMLAudioElement
     if (this.currentAudioElement) {
       try {
         this.currentAudioElement.pause();
         this.currentAudioElement.removeAttribute('src');
         this.currentAudioElement.load();
-      } catch {
-        // ignore
-      }
+      } catch {}
       this.currentAudioElement = null;
     }
 
-    // Cancel in-flight synthesis on the backend
+    // 3. Cancel in-flight synthesis on the backend
     apiBridge.cancelSpeechSynthesis().catch(() => {});
 
-    // Cancel browser Web Speech fallback if active
+    // 4. Cancel browser Web Speech fallback if active
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
@@ -225,11 +272,181 @@ export class VoiceService {
     });
   }
 
+  private base64ToArrayBuffer(base64: string): ArrayBuffer {
+    const cleaned = base64.replace(/[\s\r\n]+/g, '');
+    const binaryString = window.atob(cleaned);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  /**
+   * Plays an audio chunk via Web Audio API AudioContext for direct hardware output,
+   * falling back to HTMLAudioElement if Web Audio decoding fails.
+   */
+  private async playSingleAudioChunk(
+    chunk: { audioBase64: string; mimeType: string },
+    generationId: number,
+    messageId: string
+  ): Promise<boolean> {
+    const startTime = Date.now();
+    let arrayBuffer: ArrayBuffer;
+    try {
+      arrayBuffer = this.base64ToArrayBuffer(chunk.audioBase64);
+    } catch (err: any) {
+      console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'BASE64_DECODE_ERROR', message: err?.message || String(err) })}`);
+      return false;
+    }
+
+    // METHOD A: Web Audio API (Hardware-direct, low latency)
+    const ctx = this.getOrCreateAudioContext();
+    if (ctx) {
+      try {
+        if (ctx.state === 'suspended') {
+          await ctx.resume();
+        }
+
+        // Clone arrayBuffer because decodeAudioData detaches the buffer in some browsers
+        const bufferCopy = arrayBuffer.slice(0);
+        const audioBuffer = await ctx.decodeAudioData(bufferCopy);
+
+        if (generationId !== this.playbackGenerationId || this.currentActiveMessageId !== messageId) {
+          return false;
+        }
+
+        console.log(`[TTS_PLAYBACK_STARTED] ${JSON.stringify({
+          messageId,
+          method: 'web-audio',
+          byteCount: arrayBuffer.byteLength,
+          durationSec: Math.round(audioBuffer.duration * 10) / 10,
+        })}`);
+
+        await new Promise<void>((resolve) => {
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(ctx.destination);
+          this.currentSourceNode = source;
+
+          source.onended = () => {
+            if (this.currentSourceNode === source) {
+              this.currentSourceNode = null;
+            }
+            resolve();
+          };
+
+          source.start(0);
+        });
+
+        const elapsedMs = Date.now() - startTime;
+        console.log(`[TTS_PLAYBACK_ENDED] ${JSON.stringify({ messageId, method: 'web-audio', elapsedMs })}`);
+        return true;
+      } catch (decodeErr: any) {
+        console.warn('[NEXUS Voice] Web Audio decode failed, falling back to HTMLAudioElement:', decodeErr);
+      }
+    }
+
+    // METHOD B: HTMLAudioElement fallback
+    let blobUrl: string | null = null;
+    try {
+      const blob = new Blob([arrayBuffer], { type: chunk.mimeType || 'audio/mpeg' });
+      blobUrl = URL.createObjectURL(blob);
+    } catch {
+      blobUrl = `data:${chunk.mimeType || 'audio/mpeg'};base64,${chunk.audioBase64}`;
+    }
+
+    const currentUrl = blobUrl;
+    console.log(`[TTS_PLAYBACK_STARTED] ${JSON.stringify({
+      messageId,
+      method: 'audio-element',
+      byteCount: arrayBuffer.byteLength,
+    })}`);
+
+    const playedOk = await new Promise<boolean>((resolve) => {
+      if (generationId !== this.playbackGenerationId) {
+        if (currentUrl.startsWith('blob:')) URL.revokeObjectURL(currentUrl);
+        resolve(false);
+        return;
+      }
+
+      const audio = new Audio();
+      this.currentAudioElement = audio;
+
+      const cleanup = () => {
+        if (this.currentAudioElement === audio) {
+          this.currentAudioElement = null;
+        }
+        if (currentUrl.startsWith('blob:')) {
+          try {
+            URL.revokeObjectURL(currentUrl);
+          } catch {}
+        }
+        audio.removeAttribute('src');
+        audio.load();
+      };
+
+      audio.onended = () => {
+        cleanup();
+        resolve(true);
+      };
+
+      audio.onerror = (e) => {
+        console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'AUDIO_ELEMENT_ERROR', error: String(e) })}`);
+        cleanup();
+        resolve(false);
+      };
+
+      audio.src = currentUrl;
+      audio.play().catch((playErr) => {
+        console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'AUTOPLAY_PREVENTED', message: playErr?.message || String(playErr) })}`);
+        cleanup();
+        resolve(false);
+      });
+    });
+
+    const elapsedMs = Date.now() - startTime;
+    if (playedOk) {
+      console.log(`[TTS_PLAYBACK_ENDED] ${JSON.stringify({ messageId, method: 'audio-element', elapsedMs })}`);
+    }
+    return playedOk;
+  }
+
+  private async playAudioChunks(
+    chunks: Array<{ audioBase64: string; mimeType: string }>,
+    generationId: number,
+    messageId: string
+  ): Promise<boolean> {
+    let anyPlayed = false;
+    for (let i = 0; i < chunks.length; i++) {
+      if (generationId !== this.playbackGenerationId || this.currentActiveMessageId !== messageId) {
+        break;
+      }
+      const ok = await this.playSingleAudioChunk(chunks[i], generationId, messageId);
+      if (ok) anyPlayed = true;
+    }
+
+    if (generationId === this.playbackGenerationId) {
+      this.currentAudioElement = null;
+      this.currentSourceNode = null;
+      this.isSpeakingAudio = false;
+      this.isSynthesizingAudio = false;
+      this.currentActiveMessageId = null;
+      this.notify();
+    }
+    return anyPlayed;
+  }
+
   /**
    * Synthesizes and speaks an assistant response using ElevenLabs voice.
    * Ensures zero overlap: any existing playback is stopped first.
    */
-  public async speak(text: string, messageId: string): Promise<boolean> {
+  public async speak(text: string, messageId: string, forceEnable = false): Promise<boolean> {
+    if (forceEnable && !this.isVoiceEnabled) {
+      this.setEnabled(true);
+    }
+
     if (!this.isVoiceEnabled) {
       return false;
     }
@@ -261,10 +478,9 @@ export class VoiceService {
         this.isSynthesizingAudio = false;
         this.lastErrorMessage = result.error || 'ElevenLabs speech synthesis failed.';
         this.notify();
-        console.warn('[NEXUS Voice] ElevenLabs synthesis notice:', this.lastErrorMessage);
+        console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'SYNTHESIS_FAILED', message: this.lastErrorMessage })}`);
 
         // Fallback to local desktop Web Speech synthesis so audio is immediately audible
-        // while clearly displaying the ElevenLabs permission warning in UI
         if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
           console.log('[NEXUS Voice] Using desktop speech synthesis fallback for audible speech...');
           return await this.speakWithWebSpeechFallback(text, generationId, messageId);
@@ -279,16 +495,19 @@ export class VoiceService {
       this.isSpeakingAudio = true;
       this.notify();
 
-      console.log(`[NEXUS Voice] Received ${result.audioChunks.length} ElevenLabs audio chunk(s). Starting playback...`);
-
-      // Play audio chunks sequentially
-      await this.playAudioChunks(result.audioChunks, generationId, messageId);
-      return true;
+      // Play audio chunks using hardware-direct Web Audio with fallback
+      const playbackOk = await this.playAudioChunks(result.audioChunks, generationId, messageId);
+      if (!playbackOk && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        console.warn('[NEXUS Voice] Audio decoding failed; trying speech synthesis fallback...');
+        return await this.speakWithWebSpeechFallback(text, generationId, messageId);
+      }
+      return playbackOk;
     } catch (err: any) {
       if (generationId === this.playbackGenerationId) {
         this.isSynthesizingAudio = false;
         this.lastErrorMessage = err?.message || String(err);
         this.notify();
+        console.error(`[TTS_ERROR] ${JSON.stringify({ category: 'UNCAUGHT_VOICE_ERROR', message: this.lastErrorMessage })}`);
 
         if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
           return await this.speakWithWebSpeechFallback(text, generationId, messageId);
@@ -299,96 +518,6 @@ export class VoiceService {
         this.notify();
       }
       return false;
-    }
-  }
-
-  private base64ToBlob(base64: string, mimeType: string = 'audio/mpeg'): Blob {
-    try {
-      const binaryString = window.atob(base64);
-      const len = binaryString.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-      }
-      return new Blob([bytes], { type: mimeType });
-    } catch (err) {
-      console.warn('[NEXUS Voice] Failed to decode base64 audio to Blob:', err);
-      return new Blob([], { type: mimeType });
-    }
-  }
-
-  private async playAudioChunks(
-    chunks: Array<{ audioBase64: string; mimeType: string }>,
-    generationId: number,
-    messageId: string
-  ): Promise<void> {
-    for (let i = 0; i < chunks.length; i++) {
-      if (generationId !== this.playbackGenerationId || this.currentActiveMessageId !== messageId) {
-        break;
-      }
-
-      const chunk = chunks[i];
-      let objectUrl: string | null = null;
-      try {
-        const blob = this.base64ToBlob(chunk.audioBase64, chunk.mimeType || 'audio/mpeg');
-        if (blob.size === 0) continue;
-        objectUrl = URL.createObjectURL(blob);
-      } catch {
-        objectUrl = `data:${chunk.mimeType || 'audio/mpeg'};base64,${chunk.audioBase64}`;
-      }
-
-      const currentUrl = objectUrl;
-
-      await new Promise<void>((resolve) => {
-        if (generationId !== this.playbackGenerationId) {
-          if (currentUrl.startsWith('blob:')) URL.revokeObjectURL(currentUrl);
-          resolve();
-          return;
-        }
-
-        const audio = new Audio();
-        this.currentAudioElement = audio;
-
-        const cleanup = () => {
-          if (this.currentAudioElement === audio) {
-            this.currentAudioElement = null;
-          }
-          if (currentUrl.startsWith('blob:')) {
-            try {
-              URL.revokeObjectURL(currentUrl);
-            } catch {}
-          }
-          audio.removeAttribute('src');
-          audio.load();
-        };
-
-        audio.onended = () => {
-          cleanup();
-          resolve();
-        };
-
-        audio.onerror = (e) => {
-          console.warn('[NEXUS Voice] Audio chunk error:', e);
-          cleanup();
-          resolve();
-        };
-
-        audio.src = currentUrl;
-        audio.play().catch((playErr) => {
-          console.warn('[NEXUS Voice] Autoplay or playback prevented:', playErr);
-          cleanup();
-          resolve();
-        });
-      });
-    }
-
-    // If this playback generation is still the active one, mark finished
-    if (generationId === this.playbackGenerationId) {
-      this.currentAudioElement = null;
-      this.isSpeakingAudio = false;
-      this.isSynthesizingAudio = false;
-      this.currentActiveMessageId = null;
-      this.notify();
     }
   }
 }

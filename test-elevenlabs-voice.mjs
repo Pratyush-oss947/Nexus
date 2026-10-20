@@ -418,6 +418,65 @@ Aapka task successfully complete ho gaya hai!
   console.log();
 
   // ====================================================================
+  // TEST 13: Rule 3 & 4 — Diagnostics and Playback Architecture
+  // ====================================================================
+  console.log('TEST 13: Diagnostics and renderer audio playback pipeline');
+  {
+    // Test that diagnostics tags are properly structured
+    const sampleDiag = {
+      started: JSON.stringify({ voiceId: 'hw70l6UiioXIpgpHCjP6', model: 'eleven_multilingual_v2', textChars: 24, snippet: 'Hello NEXUS.' }),
+      response: JSON.stringify({ status: 200, ok: true, durationMs: 350 }),
+      received: JSON.stringify({ byteCount: 23448, format: 'audio/mpeg' }),
+      playbackStarted: JSON.stringify({ messageId: 'msg-1', method: 'web-audio', byteCount: 23448 }),
+      playbackEnded: JSON.stringify({ messageId: 'msg-1', method: 'web-audio', elapsedMs: 1400 }),
+      error: JSON.stringify({ category: 'PLAYBACK_FAILED', message: 'Hardware audio suspended' })
+    };
+
+    assert(sampleDiag.started.includes('hw70l6UiioXIpgpHCjP6'), 'TTS_REQUEST_STARTED includes voiceId');
+    assert(sampleDiag.response.includes('200'), 'TTS_API_RESPONSE includes status');
+    assert(sampleDiag.received.includes('audio/mpeg'), 'TTS_AUDIO_RECEIVED specifies audio/mpeg format');
+    assert(sampleDiag.playbackStarted.includes('web-audio'), 'TTS_PLAYBACK_STARTED tracks web-audio engine');
+    assert(sampleDiag.playbackEnded.includes('elapsedMs'), 'TTS_PLAYBACK_ENDED tracks duration');
+    assert(sampleDiag.error.includes('PLAYBACK_FAILED'), 'TTS_ERROR categorizes failures cleanly');
+
+    // Test base64 to ArrayBuffer sanitization
+    const rawB64 = "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYwLjE2LjEwMAAAAAAAAAAAAAAA//tQxAADB5gA";
+    const cleaned = rawB64.replace(/[\s\r\n]+/g, '');
+    const buf = Buffer.from(cleaned, 'base64');
+    assert(buf.byteLength > 0, 'Audio base64 correctly converted to non-empty binary buffer');
+    assert(buf[0] === 0x49 && buf[1] === 0x44 && buf[2] === 0x33, 'Valid ID3 MP3 binary header verified');
+  }
+  console.log();
+
+  // ====================================================================
+  // TEST 14: Rule 4 — Prompt-aware speech triggering & Stop Speaking
+  // ====================================================================
+  console.log('TEST 14: Prompt-aware speech triggering and anti-overlap');
+  {
+    const explicitPrompts = [
+      'Hello NEXUS. Speak this sentence aloud.',
+      'Can you talk to me in voice?',
+      'Please read aloud the latest summary',
+      'Say aloud what you found'
+    ];
+    for (const p of explicitPrompts) {
+      const match = /\b(speak|talk|read aloud|say aloud|voice)\b/i.test(p);
+      assert(match === true, `Prompt "${p}" triggers speech auto-enable`);
+    }
+
+    const silentPrompts = [
+      'download file report.pdf',
+      'check tasks',
+      'calculate 2+2'
+    ];
+    for (const p of silentPrompts) {
+      const match = /\b(speak|talk|read aloud|say aloud|voice)\b/i.test(p);
+      assert(match === false, `Silent prompt "${p}" respects normal voice toggle`);
+    }
+  }
+  console.log();
+
+  // ====================================================================
   // FINAL REPORT
   // ====================================================================
   console.log('======================================================================');

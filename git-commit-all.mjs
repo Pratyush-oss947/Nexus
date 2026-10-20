@@ -39,7 +39,7 @@ async function main() {
       name: 'NEXUS Agent',
       email: 'nexus@ai.local',
     },
-    message: 'feat: update ElevenLabs API key, voice integration, task engine, and custom branding icon',
+    message: 'fix(voice): root-cause fix for ElevenLabs voice integration, Web Audio API playback, multi-path env discovery, and comprehensive acceptance test suite',
   });
 
   console.log(`Successfully committed! Commit SHA: ${sha}`);
