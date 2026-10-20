@@ -39,7 +39,7 @@ async function main() {
       name: 'NEXUS Agent',
       email: 'nexus@ai.local',
     },
-    message: 'fix(agent): resolve permission spam with scoped workflow authorization and fix Notepad execution with robust desktop enumeration and cancellation',
+    message: 'fix(voice): resolve intermittent ElevenLabs auth failure with authoritative in-memory store, placeholder overwrite guards, and granular error classification',
   });
 
   console.log(`Successfully committed! Commit SHA: ${sha}`);
