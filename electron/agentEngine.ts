@@ -478,10 +478,21 @@ Core Execution Rules:
       desktopService: this.desktopService,
       downloadManager: this.downloadManager,
       taskManager: this.taskManager,
-      onRequestApproval,
+      onRequestApproval: async (approval) => {
+        if (this.isAborted) return false;
+        return onRequestApproval(approval);
+      },
       onEmitEvent: emit,
       taskPlan,
+      isActionAuthorized: (toolName: string, args: Record<string, any>, currentUrl?: string) => {
+        return TaskPlanner.isActionCoveredByWorkflow(executionState, toolName, args, currentUrl);
+      },
+      authorizeWorkflow: (workflowType: 'LOGIN' | 'FORM_SUBMIT', targetUrlOrDomain: string) => {
+        TaskPlanner.authorizeWorkflow(executionState, workflowType, targetUrlOrDomain);
+      },
     };
+
+    const toolFailureCounts = new Map<string, number>();
 
     let finalAnswer = '';
 
@@ -821,6 +832,11 @@ Core Execution Rules:
           break;
         }
 
+        if (this.isAborted) {
+          shouldBreakTurn = true;
+          break;
+        }
+
         const callFingerprint = TaskPlanner.computeActionFingerprint(call.name, call.args);
 
         // Within-cycle deduplication
@@ -855,41 +871,74 @@ Core Execution Rules:
         // Consequential action protection
         const isConsequential = ToolDispatcher.isConsequentialAction(call.name, call.args);
         if (isConsequential) {
-          if (executionState.consequentialActionsExecuted.has(callFingerprint)) {
-            const blockMsg = `Consequential action "${call.name}" with identical arguments has already been executed in this task. Duplicate execution blocked for safety.`;
-            logDiagnostic('CONSEQUENTIAL_DUPLICATE_BLOCKED', { tool: call.name, fingerprint: callFingerprint });
-            const blockedResult = { success: false, error: blockMsg };
-            turnResults.push({
-              toolName: call.name,
-              callId: call.id,
-              result: blockedResult,
-              sanitized: sanitizeToolResultForModel(blockedResult),
+          const currentUrl = taskPlan.currentBrowserUrl || '';
+          const isCovered = TaskPlanner.isActionCoveredByWorkflow(executionState, call.name, call.args, currentUrl);
+
+          if (isCovered) {
+            logDiagnostic('APPROVAL_REUSED_WORKFLOW', {
+              tool: call.name,
+              workflow: executionState.authorizedWorkflow?.workflowType,
+              domain: executionState.authorizedWorkflow?.domain,
             });
-            continue;
-          }
+          } else {
+            if (executionState.consequentialActionsExecuted.has(callFingerprint)) {
+              const blockMsg = `Consequential action "${call.name}" with identical arguments has already been executed in this task. Duplicate execution blocked for safety.`;
+              logDiagnostic('CONSEQUENTIAL_DUPLICATE_BLOCKED', { tool: call.name, fingerprint: callFingerprint });
+              const blockedResult = { success: false, error: blockMsg };
+              turnResults.push({
+                toolName: call.name,
+                callId: call.id,
+                result: blockedResult,
+                sanitized: sanitizeToolResultForModel(blockedResult),
+              });
+              continue;
+            }
 
-          const approved = await onRequestApproval({
-            id: `appr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-            action: call.name,
-            details: JSON.stringify(call.args),
-            targetUrl: taskPlan.currentBrowserUrl || '',
-            isConsequential: true,
-          });
+            // Build masked details without exposing passwords or keys
+            const safeArgs: Record<string, any> = {};
+            for (const [k, v] of Object.entries(call.args || {})) {
+              const lk = k.toLowerCase();
+              if (lk.includes('pass') || lk.includes('secret') || lk.includes('token') || lk.includes('key')) {
+                safeArgs[k] = '••••••••';
+              } else if (typeof v === 'object' && v !== null) {
+                const sub: Record<string, any> = {};
+                for (const [sk, sv] of Object.entries(v)) {
+                  const lsk = sk.toLowerCase();
+                  sub[sk] = (lsk.includes('pass') || lsk.includes('secret') || lsk.includes('token')) ? '••••••••' : sv;
+                }
+                safeArgs[k] = sub;
+              } else {
+                safeArgs[k] = v;
+              }
+            }
 
-          if (!approved) {
-            const rejectMsg = `User declined approval for consequential action "${call.name}". Action cancelled.`;
-            logDiagnostic('APPROVAL_DECLINED', { tool: call.name });
-            const rejectedResult = { success: false, error: rejectMsg };
-            turnResults.push({
-              toolName: call.name,
-              callId: call.id,
-              result: rejectedResult,
-              sanitized: sanitizeToolResultForModel(rejectedResult),
+            const approved = await onRequestApproval({
+              id: `appr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+              action: call.name,
+              details: JSON.stringify(safeArgs),
+              targetUrl: currentUrl || '',
+              isConsequential: true,
             });
-            continue;
-          }
 
-          executionState.consequentialActionsExecuted.add(callFingerprint);
+            if (!approved) {
+              const rejectMsg = `User declined approval for consequential action "${call.name}". Action cancelled.`;
+              logDiagnostic('APPROVAL_DECLINED', { tool: call.name });
+              const rejectedResult = { success: false, error: rejectMsg };
+              turnResults.push({
+                toolName: call.name,
+                callId: call.id,
+                result: rejectedResult,
+                sanitized: sanitizeToolResultForModel(rejectedResult),
+              });
+              continue;
+            }
+
+            if (call.name === 'browser_login') {
+              TaskPlanner.authorizeWorkflow(executionState, 'LOGIN', currentUrl || call.args.domain || '');
+            }
+
+            executionState.consequentialActionsExecuted.add(callFingerprint);
+          }
         }
 
         // Handle finish_task
@@ -981,17 +1030,43 @@ Core Execution Rules:
         }
 
         // Record in execution state action history
+        const actionSucceeded = Boolean(dispatchResult.success && toolResult.success !== false);
         executionState.actionHistory.push({
           id: `act-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           toolName: call.name,
           fingerprint: callFingerprint,
           args: call.args,
-          success: Boolean(dispatchResult.success && toolResult.success !== false),
+          success: actionSucceeded,
           durationMs,
           timestamp: Date.now(),
           error: dispatchResult.error || toolResult.error,
           resultSummary: toolResult.title || toolResult.url || toolResult.summary,
         });
+
+        // Bounded retry protection: stop repeating the same failed action
+        if (!actionSucceeded) {
+          const failCount = (toolFailureCounts.get(callFingerprint) || 0) + 1;
+          toolFailureCounts.set(callFingerprint, failCount);
+
+          if (failCount >= 2) {
+            const lastSuccess = executionState.actionHistory.filter((a) => a.success).pop();
+            const failureDetail = toolResult.error || dispatchResult.error || 'Execution failure';
+            const stopMsg = `Action "${call.name}" failed repeatedly (${failCount} times): ${failureDetail}.${lastSuccess ? ` Last successful action: "${lastSuccess.toolName}".` : ''} Halting retries to prevent getting stuck.`;
+            emit('ERROR', stopMsg);
+            logDiagnostic('TOOL_REPEAT_FAILURE_HALTED', { tool: call.name, failCount, error: failureDetail });
+            executionState.status = 'FAILED';
+            executionState.verificationVerdict = 'FAILED';
+            executionState.verificationDetails = stopMsg;
+            finalAnswer = stopMsg;
+            shouldBreakTurn = true;
+            break;
+          }
+        }
+
+        if (this.isAborted) {
+          shouldBreakTurn = true;
+          break;
+        }
 
         executionSteps.push({
           step: executionState.currentStepCount,
@@ -1067,9 +1142,14 @@ Core Execution Rules:
       executionState.status = 'COMPLETED';
       emit('SUCCESS', finalAnswer);
     } else {
-      executionState.status = 'INCOMPLETE';
+      if (executionState.status !== 'CANCELLED' && executionState.status !== 'NEEDS_USER_INPUT') {
+        executionState.status = 'FAILED';
+      }
       emit('INFO', finalAnswer);
     }
+
+    // Always expire workflow authorization when task ends to prevent unauthorized reuse
+    TaskPlanner.clearWorkflowAuthorization(executionState);
 
     logDiagnostic('TASK_FINISH', {
       taskId: executionState.taskId,

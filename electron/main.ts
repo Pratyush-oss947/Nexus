@@ -560,6 +560,10 @@ ipcMain.handle('gemini:cancel-chat', async () => {
   if (agentEngine) {
     agentEngine.abort();
   }
+  for (const [id, resolve] of pendingApprovals.entries()) {
+    try { resolve(false); } catch {}
+  }
+  pendingApprovals.clear();
   return;
 });
 
@@ -607,6 +611,10 @@ ipcMain.handle('automation:stop', async () => {
   if (agentEngine) {
     agentEngine.abort();
   }
+  for (const [id, resolve] of pendingApprovals.entries()) {
+    try { resolve(false); } catch {}
+  }
+  pendingApprovals.clear();
   return;
 });
 

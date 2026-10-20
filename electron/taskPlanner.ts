@@ -108,6 +108,13 @@ export interface ActionOutcomeRecord {
   };
 }
 
+export interface AuthorizedWorkflowContext {
+  workflowType: 'LOGIN' | 'FORM_SUBMIT';
+  domain: string; // normalized hostname, e.g. "example.com" or "localhost"
+  taskId: string;
+  grantedAt: number;
+}
+
 export interface TaskExecutionState {
   taskId: string;
   startTime: number;
@@ -122,9 +129,10 @@ export interface TaskExecutionState {
   isVerified: boolean;
   verificationVerdict: 'VERIFIED' | 'INCOMPLETE' | 'FAILED' | 'BLOCKED';
   verificationDetails?: string;
-  status: 'RUNNING' | 'COMPLETED' | 'INCOMPLETE' | 'FAILED' | 'CANCELLED' | 'BLOCKED' | 'AWAITING_CONFIRMATION';
+  status: 'RUNNING' | 'COMPLETED' | 'INCOMPLETE' | 'FAILED' | 'CANCELLED' | 'BLOCKED' | 'AWAITING_CONFIRMATION' | 'NEEDS_USER_INPUT';
   currentPhase?: ExecutionPhase;
   blockerReason?: string;
+  authorizedWorkflow?: AuthorizedWorkflowContext;
 }
 
 const COMMON_SITES: Record<string, { url: string; name: string }> = {
@@ -836,11 +844,11 @@ export class TaskPlanner {
 
       if (
         (toolName === 'desktop_write_notepad' || toolName === 'write_notepad') &&
-        (step.description.toLowerCase().includes('notepad') || step.description.toLowerCase().includes('poem') || step.description.toLowerCase().includes('write') || step.description.toLowerCase().includes('document'))
+        (step.description.toLowerCase().includes('notepad') || step.description.toLowerCase().includes('poem') || step.description.toLowerCase().includes('write') || step.description.toLowerCase().includes('document') || step.description.toLowerCase().includes('focus'))
       ) {
         step.status = 'COMPLETED';
         step.verifiedDetail = `Wrote into Notepad (${result.typedLength || 0} chars, newDoc: ${Boolean(result.isNewDocument)})`;
-        break;
+        continue;
       }
 
       if (
@@ -914,11 +922,11 @@ export class TaskPlanner {
 
       if (
         (toolName === 'desktop_write_notepad' || toolName === 'write_notepad') &&
-        (lowerReq.includes('notepad') || lowerReq.includes('poem') || lowerReq.includes('note') || lowerReq.includes('document'))
+        (lowerReq.includes('notepad') || lowerReq.includes('poem') || lowerReq.includes('note') || lowerReq.includes('document') || lowerReq.includes('focus'))
       ) {
         req.status = 'COMPLETED';
         req.answerOrEvidence = `Managed Notepad document and verified text insertion (${result.typedLength || 0} chars, new doc: ${Boolean(result.isNewDocument)}).`;
-        break;
+        continue;
       }
 
       if (
@@ -1303,6 +1311,112 @@ Do NOT divert from or replace this goal under any circumstance.
       }
     }
     return `${normalizedName}::${JSON.stringify(sortedArgs)}`;
+  }
+
+  /**
+   * Normalizes a URL or domain string into a clean hostname without protocol, port, or www prefix.
+   */
+  public static normalizeDomain(urlOrDomain?: string): string {
+    if (!urlOrDomain) return '';
+    const clean = urlOrDomain.trim().toLowerCase();
+    try {
+      if (clean.startsWith('http://') || clean.startsWith('https://')) {
+        const u = new URL(clean);
+        return u.hostname.replace(/^www\./, '');
+      }
+    } catch {}
+    return clean.replace(/^https?:\/\//, '').split('/')[0].split(':')[0].replace(/^www\./, '');
+  }
+
+  /**
+   * Scopes authorization for a high-level workflow (e.g. login) to a specific domain and current task.
+   */
+  public static authorizeWorkflow(
+    state: TaskExecutionState,
+    workflowType: 'LOGIN' | 'FORM_SUBMIT',
+    targetUrlOrDomain: string
+  ): void {
+    const domain = TaskPlanner.normalizeDomain(targetUrlOrDomain);
+    if (!domain) return;
+    state.authorizedWorkflow = {
+      workflowType,
+      domain,
+      taskId: state.taskId,
+      grantedAt: Date.now(),
+    };
+  }
+
+  /**
+   * Explicitly expires and clears workflow-level authorization.
+   */
+  public static clearWorkflowAuthorization(state: TaskExecutionState): void {
+    state.authorizedWorkflow = undefined;
+  }
+
+  /**
+   * Determines if a sub-step is covered by an active workflow-level authorization.
+   * Scoped strictly to the current task and approved domain.
+   * High-consequence actions (e.g. purchases, payments, deletion) NEVER bypass explicit approval.
+   */
+  public static isActionCoveredByWorkflow(
+    state: TaskExecutionState,
+    toolName: string,
+    args: Record<string, any> = {},
+    currentUrl = ''
+  ): boolean {
+    if (!state.authorizedWorkflow) return false;
+
+    // Check domain match
+    const actionUrl = String(args.url || args.targetUrl || args.domain || currentUrl || state.taskPlan.currentBrowserUrl || '');
+    const actionDomain = TaskPlanner.normalizeDomain(actionUrl);
+    const authDomain = state.authorizedWorkflow.domain;
+
+    if (!actionDomain || !authDomain) return false;
+    if (actionDomain !== authDomain && !actionDomain.endsWith(`.${authDomain}`) && !authDomain.endsWith(`.${actionDomain}`)) {
+      return false; // Domain mismatch / domain changed
+    }
+
+    // Explicit high-consequence patterns that ALWAYS require separate approval
+    const HIGH_CONSEQUENCE_KEYWORDS = [
+      /\b(place order|checkout|pay|payment|purchase|buy now|wire transfer|transfer money)\b/i,
+      /\b(delete account|erase data|destroy data|reset password|change security settings|revoke token)\b/i,
+    ];
+    const checkHigh = (t: string) => HIGH_CONSEQUENCE_KEYWORDS.some((p) => p.test(t));
+
+    const target = String(args.target || args.selector || args.action || '');
+    if (checkHigh(target) || checkHigh(toolName)) {
+      return false;
+    }
+    if (args.fields && typeof args.fields === 'object') {
+      for (const [k, v] of Object.entries(args.fields)) {
+        if (checkHigh(String(k)) || checkHigh(String(v))) {
+          return false;
+        }
+      }
+    }
+
+    if (state.authorizedWorkflow.workflowType === 'LOGIN') {
+      const normTool = (toolName || '').toLowerCase().replace(/[-_.]+/g, '_');
+      const allowedLoginTools = new Set([
+        'browser_login',
+        'browser_fill',
+        'fill_form',
+        'smart_fill_form',
+        'browser_type',
+        'browser_click',
+        'click_control',
+        'click_element',
+        'open_website',
+        'browser_navigate',
+        'navigate_current_tab',
+        'browser_inspect_forms',
+        'inspect_forms',
+        'browser_detect_challenges',
+      ]);
+      return allowedLoginTools.has(normTool);
+    }
+
+    return false;
   }
 
   /**

@@ -20,6 +20,8 @@ export interface ToolExecutionContext {
   }) => Promise<boolean>;
   onEmitEvent: (type: any, message: string, details?: string, url?: string, screenshotUrl?: string) => void;
   taskPlan?: any;
+  isActionAuthorized?: (toolName: string, args: Record<string, any>, currentUrl?: string) => boolean;
+  authorizeWorkflow?: (workflowType: 'LOGIN' | 'FORM_SUBMIT', targetUrlOrDomain: string) => void;
 }
 
 export interface ToolDefinition {
@@ -485,19 +487,22 @@ const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
 
       // Consequential action check (submit, pay, purchase, checkout, delete)
       if (isConsequentialAction(target)) {
-        ctx.onEmitEvent('APPROVAL', `Approval requested before action: Click "${target}"`);
         const status = await ctx.browserService.getStatus();
-        const approved = await ctx.onRequestApproval({
-          id: `appr-${Date.now()}`,
-          action: `Click "${target}"`,
-          details: `The agent requested to click a potentially consequential element on: ${status.url || 'webpage'}`,
-          targetUrl: status.url || '',
-          isConsequential: true,
-        });
+        const isCovered = ctx.isActionAuthorized && ctx.isActionAuthorized('click_control', { target }, status.url);
+        if (!isCovered) {
+          ctx.onEmitEvent('APPROVAL', `Approval requested before action: Click "${target}"`);
+          const approved = await ctx.onRequestApproval({
+            id: `appr-${Date.now()}`,
+            action: `Click "${target}"`,
+            details: `The agent requested to click a potentially consequential element on: ${status.url || 'webpage'}`,
+            targetUrl: status.url || '',
+            isConsequential: true,
+          });
 
-        if (!approved) {
-          ctx.onEmitEvent('INFO', `User declined approval for clicking "${target}".`);
-          return { success: false, error: 'Action cancelled: user declined approval for this consequential action.' };
+          if (!approved) {
+            ctx.onEmitEvent('INFO', `User declined approval for clicking "${target}".`);
+            return { success: false, error: 'Action cancelled: user declined approval for this consequential action.' };
+          }
         }
       }
 
@@ -596,19 +601,21 @@ const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
       }
 
       // Consequential / sensitive field check
-      for (const [k, v] of Object.entries(fieldsMap)) {
-        if (isSensitiveField(k) || isConsequentialAction(v)) {
-          ctx.onEmitEvent('APPROVAL', `Approval requested before filling sensitive form field: "${k}"`);
-          const status = await ctx.browserService.getStatus();
+      const status = await ctx.browserService.getStatus();
+      const isCovered = ctx.isActionAuthorized && ctx.isActionAuthorized('fill_form', { fields: fieldsMap }, status.url);
+      if (!isCovered) {
+        const sensitiveFields = Object.keys(fieldsMap).filter((k) => isSensitiveField(k) || isConsequentialAction(String(fieldsMap[k])));
+        if (sensitiveFields.length > 0) {
+          ctx.onEmitEvent('APPROVAL', `Approval requested before filling form field(s): ${sensitiveFields.join(', ')}`);
           const approved = await ctx.onRequestApproval({
             id: `appr-form-${Date.now()}`,
-            action: `Fill sensitive form field "${k}"`,
-            details: `The agent requested to enter information into a potentially sensitive field: ${k}`,
+            action: `Fill form field(s): ${sensitiveFields.join(', ')}`,
+            details: `The agent requested to enter information into sensitive field(s) (${sensitiveFields.join(', ')}) on: ${status.url || 'webpage'}`,
             targetUrl: status.url || '',
             isConsequential: true,
           });
           if (!approved) {
-            return { success: false, error: `User declined form filling for sensitive field: "${k}".` };
+            return { success: false, error: `User declined form filling for field(s): "${sensitiveFields.join(', ')}".` };
           }
         }
       }
@@ -707,9 +714,10 @@ const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
       }
 
       // Check if submission or sensitive field requires approval
-      const requiresApproval = submit || Object.keys(fields).some((k) => isSensitiveField(k));
+      const status = await ctx.browserService.getStatus();
+      const isCovered = ctx.isActionAuthorized && ctx.isActionAuthorized('smart_fill_form', { fields, submit }, status.url);
+      const requiresApproval = !isCovered && (submit || Object.keys(fields).some((k) => isSensitiveField(k)));
       if (requiresApproval) {
-        const status = await ctx.browserService.getStatus();
         ctx.onEmitEvent('APPROVAL', `Approval requested before ${submit ? 'submitting' : 'filling'} form on ${status.url}`);
         const approved = await ctx.onRequestApproval({
           id: `appr-form-${Date.now()}`,
@@ -789,18 +797,25 @@ const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
         };
       }
 
-      // Consequential Action Approval Check: User must approve login action before submission
-      ctx.onEmitEvent('APPROVAL', `Approval requested to log in as "${username}" on ${currentUrl}`);
-      const approved = await ctx.onRequestApproval({
-        id: `appr-login-${Date.now()}`,
-        action: `Log in as user "${username}"`,
-        details: `The agent requests permission to authenticate with user "${username}" on "${currentUrl}". Password is secure and masked.`,
-        targetUrl: currentUrl,
-        isConsequential: true,
-      });
+      // Consequential Action Approval Check: User must approve login action before submission unless workflow already authorized
+      const isCovered = ctx.isActionAuthorized && ctx.isActionAuthorized('browser_login', { username, domain: args.domain }, currentUrl);
+      if (!isCovered) {
+        ctx.onEmitEvent('APPROVAL', `Approval requested to log in as "${username}" on ${currentUrl}`);
+        const approved = await ctx.onRequestApproval({
+          id: `appr-login-${Date.now()}`,
+          action: `Log in as user "${username}"`,
+          details: `The agent requests permission to authenticate with user "${username}" on "${currentUrl}". Password is secure and masked.`,
+          targetUrl: currentUrl,
+          isConsequential: true,
+        });
 
-      if (!approved) {
-        return { success: false, state: 'failed', error: `User declined login authorization for "${username}" on ${currentUrl}.` };
+        if (!approved) {
+          return { success: false, state: 'failed', error: `User declined login authorization for "${username}" on ${currentUrl}.` };
+        }
+
+        if (ctx.authorizeWorkflow) {
+          ctx.authorizeWorkflow('LOGIN', currentUrl);
+        }
       }
 
       ctx.onEmitEvent('FILL', `Authenticating as "${username}" on ${currentUrl} (password masked)`);

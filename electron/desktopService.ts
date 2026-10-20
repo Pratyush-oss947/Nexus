@@ -181,14 +181,17 @@ export class DesktopService {
   /**
    * Safely launches an application on the interactive user desktop and verifies window state.
    */
-  public async launchApp(appName: string, extraArgs = ''): Promise<DesktopActionResult<{ target: string; processId: number; window: WindowInfo | null }>> {
+  public async launchApp(appName: string, extraArgs = '', ignoreHwnd = ''): Promise<DesktopActionResult<{ target: string; processId: number; window: WindowInfo | null }>> {
     const cleanApp = (appName || '').trim();
     if (!cleanApp) {
       return { success: false, error: 'Application name or command is required.' };
     }
 
+    const helperArgs = ['launch-app', cleanApp, extraArgs];
+    if (ignoreHwnd) helperArgs.push(ignoreHwnd);
+
     const res = await this.runHelper<{ target: string; processId: number; window: WindowInfo | null }>(
-      ['launch-app', cleanApp, extraArgs],
+      helperArgs,
       12000
     );
 
@@ -204,8 +207,10 @@ export class DesktopService {
   /**
    * Waits for a window matching title or process name to appear on desktop.
    */
-  public async waitForWindow(titleQuery: string, timeoutSeconds = 6): Promise<DesktopActionResult<WindowInfo>> {
-    const res = await this.runHelper<{ window: WindowInfo }>(['wait-for-window', titleQuery, String(timeoutSeconds)], (timeoutSeconds + 2) * 1000);
+  public async waitForWindow(titleQuery: string, timeoutSeconds = 6, ignoreHwnd = ''): Promise<DesktopActionResult<WindowInfo>> {
+    const helperArgs = ['wait-for-window', titleQuery, String(timeoutSeconds)];
+    if (ignoreHwnd) helperArgs.push(ignoreHwnd);
+    const res = await this.runHelper<{ window: WindowInfo }>(helperArgs, (timeoutSeconds + 2) * 1000);
     if (res.success && res.data) {
       return { success: true, data: res.data.window };
     }
@@ -315,20 +320,33 @@ export class DesktopService {
         } else {
           // Default when user has not specified existing document:
           // Preserve existing user text by launching a separate clean document/window
-          const launchRes = await this.launchApp('notepad');
-          if (launchRes.success && launchRes.data?.window) {
+          const existingHwnds = notepadWindows.map((w) => w.hwnd).join(',');
+          const launchRes = await this.launchApp('notepad', '', existingHwnds);
+          if (launchRes.success && launchRes.data?.window && !notepadWindows.some((old) => old.hwnd.toLowerCase() === launchRes.data?.window?.hwnd.toLowerCase())) {
             targetWindowInfo = launchRes.data.window;
             targetHwnd = launchRes.data.window.hwnd;
             createdNew = true;
           } else {
-            // Fallback: activate existing and send CTRL+N for new document
-            await this.activateWindow(singleWin.hwnd);
-            await this.pressKey('CTRL+N', singleWin.hwnd);
-            await new Promise((r) => setTimeout(r, 400));
-            const recheck = await this.getActiveWindow();
-            targetWindowInfo = recheck.data || singleWin;
-            targetHwnd = targetWindowInfo.hwnd;
-            createdNew = true;
+            // Check if a new window appeared in listWindows
+            const freshList = await this.listWindows();
+            const newWin = freshList.data?.find((w) =>
+              ((w.processName || '').toLowerCase().includes('notepad') || (w.title || '').toLowerCase().includes('notepad')) &&
+              !notepadWindows.some((old) => old.hwnd.toLowerCase() === w.hwnd.toLowerCase())
+            );
+            if (newWin) {
+              targetWindowInfo = newWin;
+              targetHwnd = newWin.hwnd;
+              createdNew = true;
+            } else {
+              // Fallback: activate existing and send CTRL+N for new document
+              await this.activateWindow(singleWin.hwnd);
+              await this.pressKey('CTRL+N', singleWin.hwnd);
+              await new Promise((r) => setTimeout(r, 400));
+              const recheck = await this.getActiveWindow();
+              targetWindowInfo = recheck.data || singleWin;
+              targetHwnd = targetWindowInfo.hwnd;
+              createdNew = true;
+            }
           }
         }
       } else {
@@ -363,16 +381,28 @@ export class DesktopService {
           };
         } else {
           // Launch a distinct new Notepad window to preserve all existing documents
-          const launchRes = await this.launchApp('notepad');
-          if (launchRes.success && launchRes.data?.window) {
+          const existingHwnds = notepadWindows.map((w) => w.hwnd).join(',');
+          const launchRes = await this.launchApp('notepad', '', existingHwnds);
+          if (launchRes.success && launchRes.data?.window && !notepadWindows.some((old) => old.hwnd.toLowerCase() === launchRes.data?.window?.hwnd.toLowerCase())) {
             targetWindowInfo = launchRes.data.window;
             targetHwnd = launchRes.data.window.hwnd;
             createdNew = true;
           } else {
-            const waitRes = await this.waitForWindow('Notepad', 5);
-            targetWindowInfo = waitRes.data || notepadWindows[0];
-            targetHwnd = targetWindowInfo.hwnd;
-            createdNew = true;
+            const freshList = await this.listWindows();
+            const newWin = freshList.data?.find((w) =>
+              ((w.processName || '').toLowerCase().includes('notepad') || (w.title || '').toLowerCase().includes('notepad')) &&
+              !notepadWindows.some((old) => old.hwnd.toLowerCase() === w.hwnd.toLowerCase())
+            );
+            if (newWin) {
+              targetWindowInfo = newWin;
+              targetHwnd = newWin.hwnd;
+              createdNew = true;
+            } else {
+              const waitRes = await this.waitForWindow('Notepad', 5, existingHwnds);
+              targetWindowInfo = waitRes.data || notepadWindows[0];
+              targetHwnd = targetWindowInfo.hwnd;
+              createdNew = true;
+            }
           }
         }
       }

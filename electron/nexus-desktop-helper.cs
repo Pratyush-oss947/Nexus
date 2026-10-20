@@ -154,10 +154,11 @@ namespace NexusDesktopHelper {
 
     public class Program {
         static void AttachDesktop() {
-            IntPtr hDefault = Win32.OpenDesktop("Default", 0, false, Win32.DESKTOP_ALL);
-            if (hDefault != IntPtr.Zero) {
-                Win32.SetThreadDesktop(hDefault);
-            }
+            // Keep thread attached to the interactive user session desktop.
+            // Explicitly calling SetThreadDesktop(OpenDesktop("Default", ...)) detaches the thread
+            // from modern Windows 11 AppContainer apps (e.g. modern packaged Notepad, Calculator, Paint),
+            // making EnumWindows unable to see their windows. Leaving default thread desktop intact ensures
+            // full visibility of both Win32 and AppContainer application windows.
         }
 
         static string EscapeJson(string s) {
@@ -230,7 +231,9 @@ namespace NexusDesktopHelper {
 
                 // If title is empty, check if it's a known process or skip
                 if (string.IsNullOrEmpty(title)) {
-                    if (procName != "Notepad" && procName != "Calculator" && procName != "ApplicationFrameHost") {
+                    if (!procName.Equals("Notepad", StringComparison.OrdinalIgnoreCase) &&
+                        !procName.Equals("Calculator", StringComparison.OrdinalIgnoreCase) &&
+                        !procName.Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase)) {
                         return true;
                     }
                     title = "[" + procName + "]";
@@ -472,17 +475,32 @@ namespace NexusDesktopHelper {
                                 }
                             }
 
-                            // Send input via SendKeys
-                            // Escape special SendKeys characters {+^%~()[]}
-                            var sbEscaped = new StringBuilder();
-                            foreach (char c in rawText) {
-                                if ("+^%~{}[]()".IndexOf(c) >= 0) {
-                                    sbEscaped.Append("{" + c + "}");
-                                } else {
-                                    sbEscaped.Append(c);
+                            // Send input via Clipboard paste (Ctrl+V) for multi-line text or long poems,
+                            // or fallback to SendKeys with proper {ENTER} translation
+                            bool usedClipboard = false;
+                            try {
+                                if (rawText.Contains("\n") || rawText.Length > 25) {
+                                    Clipboard.SetText(rawText);
+                                    SendKeys.SendWait("^v");
+                                    usedClipboard = true;
                                 }
+                            } catch {}
+
+                            if (!usedClipboard) {
+                                var sbEscaped = new StringBuilder();
+                                for (int i = 0; i < rawText.Length; i++) {
+                                    char c = rawText[i];
+                                    if (c == '\r') continue;
+                                    if (c == '\n') {
+                                        sbEscaped.Append("{ENTER}");
+                                    } else if ("+^%~{}[]()".IndexOf(c) >= 0) {
+                                        sbEscaped.Append("{" + c + "}");
+                                    } else {
+                                        sbEscaped.Append(c);
+                                    }
+                                }
+                                SendKeys.SendWait(sbEscaped.ToString());
                             }
-                            SendKeys.SendWait(sbEscaped.ToString());
 
                             runResult = string.Format("{{\"success\":true,\"typed\":\"{0}\"}}", EscapeJson(rawText));
                             break;
@@ -551,6 +569,7 @@ namespace NexusDesktopHelper {
                             }
                             string appName = args[1].ToLowerInvariant().Trim();
                             string extraArgs = args.Length > 2 ? args[2] : "";
+                            string ignoreHwndList = args.Length > 3 ? args[3].ToLowerInvariant() : "";
 
                             Process proc = null;
                             string resolvedTarget = "";
@@ -601,6 +620,12 @@ namespace NexusDesktopHelper {
                                         w.ProcessName.Equals("powershell", StringComparison.OrdinalIgnoreCase)) {
                                         continue;
                                     }
+                                    if (!string.IsNullOrEmpty(ignoreHwndList)) {
+                                        string hHex = string.Format("0x{0:x}", w.Hwnd).ToLowerInvariant();
+                                        if (ignoreHwndList.Contains(hHex) || ignoreHwndList.Contains(w.Hwnd.ToString())) {
+                                            continue;
+                                        }
+                                    }
                                     if ((proc != null && w.ProcessId == (uint)proc.Id) ||
                                         w.ProcessName.IndexOf(appName, StringComparison.OrdinalIgnoreCase) >= 0 ||
                                         w.Title.IndexOf(appName, StringComparison.OrdinalIgnoreCase) >= 0) {
@@ -637,6 +662,7 @@ namespace NexusDesktopHelper {
                             string query = args[1];
                             int timeoutSeconds = 6;
                             if (args.Length > 2) int.TryParse(args[2], out timeoutSeconds);
+                            string ignoreHwndList = args.Length > 3 ? args[3].ToLowerInvariant() : "";
 
                             WindowEntry matched = null;
                             int totalMs = timeoutSeconds * 1000;
@@ -644,6 +670,12 @@ namespace NexusDesktopHelper {
                             while (waited < totalMs) {
                                 var wins = EnumerateWindowsInternal();
                                 foreach (var w in wins) {
+                                    if (!string.IsNullOrEmpty(ignoreHwndList)) {
+                                        string hHex = string.Format("0x{0:x}", w.Hwnd).ToLowerInvariant();
+                                        if (ignoreHwndList.Contains(hHex) || ignoreHwndList.Contains(w.Hwnd.ToString())) {
+                                            continue;
+                                        }
+                                    }
                                     if (w.Title.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
                                         w.ProcessName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0) {
                                         matched = w;

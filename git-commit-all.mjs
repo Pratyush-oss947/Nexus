@@ -39,7 +39,7 @@ async function main() {
       name: 'NEXUS Agent',
       email: 'nexus@ai.local',
     },
-    message: 'feat(identity): add Pratyush creator attribution, developer bio, model disambiguation, and identity test suite',
+    message: 'fix(agent): resolve permission spam with scoped workflow authorization and fix Notepad execution with robust desktop enumeration and cancellation',
   });
 
   console.log(`Successfully committed! Commit SHA: ${sha}`);
