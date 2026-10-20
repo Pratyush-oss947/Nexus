@@ -83,6 +83,8 @@ export function redactSensitiveString(str: string): string {
     .replace(/("?(?:api[_-]?key|secret|password|passwd|token)[^":=\s]*"?\s*[:=]\s*\\?['"]?)[a-zA-Z0-9_\-\.~+/=]{6,}(\\?['"]?)/gi, '$1[REDACTED]$2')
     .replace(/(password\s*[:=]\s*)([^\s,;"'}{]+)/gi, '$1[REDACTED_PASSWORD]')
     .replace(/("password"\s*:\s*")[^"]+(")/gi, '$1[REDACTED_PASSWORD]$2')
+    .replace(/(xi-api-key\s*[:=]\s*\\?['"]?)[^\s,;"'}{]+(\\?['"]?)/gi, '$1[REDACTED_ELEVENLABS_KEY]$2')
+    .replace(/(ELEVENLABS_API_KEY\s*[:=]\s*\\?['"]?)[^\s,;"'}{]+(\\?['"]?)/gi, '$1[REDACTED_ELEVENLABS_KEY]$2')
     .replace(/\b[0-9a-f]{32}\.[0-9a-zA-Z]{24}\b/g, '[REDACTED_OLLAMA_KEY]')
     .replace(/\bAIza[0-9A-Za-z_-]{30,40}\b/g, '[REDACTED_GEMINI_KEY]')
     .replace(/\bsk_[0-9a-zA-Z]{30,64}\b/g, '[REDACTED_ELEVENLABS_KEY]');

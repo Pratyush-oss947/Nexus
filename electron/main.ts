@@ -20,7 +20,7 @@ app.setName('nexus-ai');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 // Comprehensive multi-path .env loader
-function loadEnvironmentVariables(): string | null {
+function loadEnvironmentVariables(): void {
   const possiblePaths = [
     path.join(process.cwd(), '.env'),
     path.join(__dirname, '..', '.env'),
@@ -31,19 +31,22 @@ function loadEnvironmentVariables(): string | null {
     'C:\\Users\\Home\\.gemini\\antigravity\\scratch\\nexus-ai\\.env',
   ];
 
+  let loadedCount = 0;
   for (const p of possiblePaths) {
     try {
       if (fs.existsSync(p)) {
         dotenv.config({ path: p, override: false });
-        console.log(`[NEXUS ENV] Successfully loaded environment from: ${p}`);
-        return p;
+        loadedCount++;
       }
     } catch {
       // ignore
     }
   }
-  console.warn('[NEXUS ENV] Notice: No external .env file located; relying on process environment and persistent config.');
-  return null;
+  if (loadedCount > 0) {
+    console.log(`[NEXUS ENV] Successfully loaded environment variables from ${loadedCount} location(s).`);
+  } else {
+    console.warn('[NEXUS ENV] Notice: No external .env file located; relying on process environment and persistent config.');
+  }
 }
 
 loadEnvironmentVariables();
@@ -121,36 +124,143 @@ async function getEffectiveOllamaApiKey(): Promise<string> {
   return '';
 }
 
-let cachedElevenLabsApiKey = process.env.ELEVENLABS_API_KEY || '';
-let cachedElevenLabsVoiceId = process.env.ELEVENLABS_VOICE_ID || '';
-let cachedElevenLabsModel = process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
+// ==========================================
+// ELEVENLABS CREDENTIAL & CONFIG MANAGER (SINGLE SOURCE OF TRUTH)
+// ==========================================
+interface AuthoritativeElevenLabsConfig {
+  apiKey: string;
+  voiceId: string;
+  model: string;
+  keySource: 'env' | 'settings' | 'none';
+}
 
-async function getEffectiveElevenLabsConfig(): Promise<{ apiKey: string; voiceId: string; model: string }> {
-  let apiKey = (process.env.ELEVENLABS_API_KEY || cachedElevenLabsApiKey || '').trim();
-  let voiceId = (process.env.ELEVENLABS_VOICE_ID || cachedElevenLabsVoiceId || '').trim();
-  let model = (process.env.ELEVENLABS_MODEL || cachedElevenLabsModel || 'eleven_multilingual_v2').trim();
+function sanitizeCredential(val?: string): string {
+  if (!val || typeof val !== 'string') return '';
+  return val
+    .replace(/^["']|["']$/g, '')
+    .replace(/[\r\n\t\uFEFF]/g, '')
+    .trim();
+}
 
-  if (!apiKey || !voiceId) {
-    const config = await readJsonFile<Record<string, any>>('nexus_config.json', {});
-    if (!apiKey && config.elevenLabsApiKey) apiKey = config.elevenLabsApiKey.trim();
-    if (!voiceId && config.elevenLabsVoiceId) voiceId = config.elevenLabsVoiceId.trim();
-    if (config.elevenLabsModel && config.elevenLabsModel.trim()) model = config.elevenLabsModel.trim();
+function isMaskedOrPlaceholderKey(key?: string): boolean {
+  if (!key || typeof key !== 'string') return true;
+  const clean = sanitizeCredential(key);
+  if (!clean) return true;
+  if (/^[•*.\s]+$/.test(clean)) return true;
+  if (clean.includes('••••') || clean.includes('***') || clean.includes('...')) return true;
+  if (/^(placeholder|your[-_]api[-_]key|none|null|undefined)$/i.test(clean)) return true;
+  return false;
+}
+
+let authoritativeElevenLabsConfig: AuthoritativeElevenLabsConfig = {
+  apiKey: sanitizeCredential(process.env.ELEVENLABS_API_KEY) || '',
+  voiceId: sanitizeCredential(process.env.ELEVENLABS_VOICE_ID) || 'hw70l6UiioXIpgpHCjP6',
+  model: sanitizeCredential(process.env.ELEVENLABS_MODEL) || 'eleven_multilingual_v2',
+  keySource: sanitizeCredential(process.env.ELEVENLABS_API_KEY) ? 'env' : 'none',
+};
+
+async function getEffectiveElevenLabsConfig(): Promise<AuthoritativeElevenLabsConfig> {
+  // If we already have a valid in-memory active key, return it immediately (fast and stable)
+  if (authoritativeElevenLabsConfig.apiKey && !isMaskedOrPlaceholderKey(authoritativeElevenLabsConfig.apiKey)) {
+    return authoritativeElevenLabsConfig;
   }
 
-  // Final hard fallback directly to project .env if running from packaged build
-  if (!apiKey || !voiceId) {
-    const fallbackEnvPath = 'C:\\Users\\Home\\.gemini\\antigravity\\scratch\\nexus-ai\\.env';
-    if (fs.existsSync(fallbackEnvPath)) {
-      try {
-        const parsed = dotenv.parse(fs.readFileSync(fallbackEnvPath, 'utf-8'));
-        if (!apiKey && parsed.ELEVENLABS_API_KEY) apiKey = parsed.ELEVENLABS_API_KEY.trim();
-        if (!voiceId && parsed.ELEVENLABS_VOICE_ID) voiceId = parsed.ELEVENLABS_VOICE_ID.trim();
-        if (parsed.ELEVENLABS_MODEL) model = parsed.ELEVENLABS_MODEL.trim();
-      } catch {}
+  let candidateKey = '';
+  let candidateVoiceId = '';
+  let candidateModel = 'eleven_multilingual_v2';
+  let keySource: 'env' | 'settings' | 'none' = 'none';
+
+  // 1. Check process.env
+  const envKey = sanitizeCredential(process.env.ELEVENLABS_API_KEY);
+  if (envKey && !isMaskedOrPlaceholderKey(envKey)) {
+    candidateKey = envKey;
+    keySource = 'env';
+  }
+  const envVoice = sanitizeCredential(process.env.ELEVENLABS_VOICE_ID);
+  if (envVoice) candidateVoiceId = envVoice;
+  const envModel = sanitizeCredential(process.env.ELEVENLABS_MODEL);
+  if (envModel) candidateModel = envModel;
+
+  // 2. Check nexus_config.json
+  if (!candidateKey || !candidateVoiceId) {
+    const config = await readJsonFile<Record<string, any>>('nexus_config.json', {});
+    const cfgKey = sanitizeCredential(config.elevenLabsApiKey);
+    if (!candidateKey && cfgKey && !isMaskedOrPlaceholderKey(cfgKey)) {
+      candidateKey = cfgKey;
+      keySource = 'settings';
+    }
+    const cfgVoice = sanitizeCredential(config.elevenLabsVoiceId);
+    if (!candidateVoiceId && cfgVoice) candidateVoiceId = cfgVoice;
+    const cfgModel = sanitizeCredential(config.elevenLabsModel);
+    if (cfgModel) candidateModel = cfgModel;
+  }
+
+  // 3. Check all possible .env paths across filesystem
+  if (!candidateKey || !candidateVoiceId) {
+    const envPaths = [
+      path.join(process.cwd(), '.env'),
+      path.join(__dirname, '..', '.env'),
+      path.join(__dirname, '..', '..', '.env'),
+      path.join(path.dirname(process.execPath), '.env'),
+      path.join(process.resourcesPath || '', '.env'),
+      path.join(app.getPath('userData'), '.env'),
+      'C:\\Users\\Home\\.gemini\\antigravity\\scratch\\nexus-ai\\.env',
+    ];
+
+    for (const p of envPaths) {
+      if (fs.existsSync(p)) {
+        try {
+          const parsed = dotenv.parse(fs.readFileSync(p, 'utf-8'));
+          const fileKey = sanitizeCredential(parsed.ELEVENLABS_API_KEY);
+          if (!candidateKey && fileKey && !isMaskedOrPlaceholderKey(fileKey)) {
+            candidateKey = fileKey;
+            keySource = 'env';
+          }
+          const fileVoice = sanitizeCredential(parsed.ELEVENLABS_VOICE_ID);
+          if (!candidateVoiceId && fileVoice) candidateVoiceId = fileVoice;
+          const fileModel = sanitizeCredential(parsed.ELEVENLABS_MODEL);
+          if (fileModel) candidateModel = fileModel;
+        } catch {}
+      }
+      if (candidateKey && candidateVoiceId) break;
     }
   }
 
-  return { apiKey, voiceId, model };
+  // Default voice ID and model fallbacks
+  if (!candidateVoiceId) candidateVoiceId = 'hw70l6UiioXIpgpHCjP6';
+  if (!candidateModel) candidateModel = 'eleven_multilingual_v2';
+
+  authoritativeElevenLabsConfig = {
+    apiKey: candidateKey,
+    voiceId: candidateVoiceId,
+    model: candidateModel,
+    keySource,
+  };
+
+  // If candidateKey was found from env or .env, ensure nexus_config.json also has it cached
+  if (candidateKey) {
+    try {
+      const currentConfig = await readJsonFile<Record<string, any>>('nexus_config.json', {});
+      let updated = false;
+      if (!currentConfig.elevenLabsApiKey || isMaskedOrPlaceholderKey(currentConfig.elevenLabsApiKey)) {
+        currentConfig.elevenLabsApiKey = candidateKey;
+        updated = true;
+      }
+      if (!currentConfig.elevenLabsVoiceId) {
+        currentConfig.elevenLabsVoiceId = candidateVoiceId;
+        updated = true;
+      }
+      if (!currentConfig.elevenLabsModel) {
+        currentConfig.elevenLabsModel = candidateModel;
+        updated = true;
+      }
+      if (updated) {
+        await writeJsonFile('nexus_config.json', currentConfig);
+      }
+    } catch {}
+  }
+
+  return authoritativeElevenLabsConfig;
 }
 
 // Initialize Phase 3 services
@@ -175,10 +285,16 @@ function createWindow(): void {
   agentEngine = new AgentEngine(browserService, downloadManager, taskManager, desktopService);
   automationRunner = new AutomationRunner(browserService, downloadManager);
   elevenLabsService = new ElevenLabsService(
-    cachedElevenLabsApiKey,
-    cachedElevenLabsVoiceId,
-    cachedElevenLabsModel
+    authoritativeElevenLabsConfig.apiKey,
+    authoritativeElevenLabsConfig.voiceId,
+    authoritativeElevenLabsConfig.model
   );
+  // Predictably load and sync credentials from disk / env at startup
+  getEffectiveElevenLabsConfig().then((cfg) => {
+    if (elevenLabsService) {
+      elevenLabsService.setCredentials(cfg.apiKey, cfg.voiceId, cfg.model);
+    }
+  });
 
   const iconPath = path.join(__dirname, '../build/icon.png');
   const fallbackIconPath = path.join(process.cwd(), 'build', 'icon.png');
@@ -433,37 +549,59 @@ ipcMain.handle('elevenlabs:get-status', async () => {
   const cfg = await getEffectiveElevenLabsConfig();
   if (elevenLabsService) {
     elevenLabsService.setCredentials(cfg.apiKey, cfg.voiceId, cfg.model);
-    return elevenLabsService.getStatus();
+    return elevenLabsService.getStatus(cfg.keySource);
   }
   const tempService = new ElevenLabsService(cfg.apiKey, cfg.voiceId, cfg.model);
-  return tempService.getStatus();
+  return tempService.getStatus(cfg.keySource);
 });
 
 ipcMain.handle('elevenlabs:set-config', async (_event, config: { apiKey?: string; voiceId?: string; model?: string }) => {
   const currentConfig = await readJsonFile<Record<string, any>>('nexus_config.json', {});
+  const effective = await getEffectiveElevenLabsConfig();
+
+  // ONLY update the key if a valid, non-placeholder, non-empty key was explicitly passed
   if (config && typeof config.apiKey === 'string') {
-    cachedElevenLabsApiKey = config.apiKey.trim();
-    currentConfig.elevenLabsApiKey = cachedElevenLabsApiKey;
+    const cleanKey = sanitizeCredential(config.apiKey);
+    if (cleanKey && !isMaskedOrPlaceholderKey(cleanKey)) {
+      authoritativeElevenLabsConfig.apiKey = cleanKey;
+      authoritativeElevenLabsConfig.keySource = 'settings';
+      currentConfig.elevenLabsApiKey = cleanKey;
+    } else {
+      // Intentionally preserve the active key; do not wipe with empty string or UI mask
+      console.log('[NEXUS Voice Config] Preserved active ElevenLabs API key against empty/placeholder overwrite.');
+    }
   }
-  if (config && typeof config.voiceId === 'string') {
-    cachedElevenLabsVoiceId = config.voiceId.trim();
-    currentConfig.elevenLabsVoiceId = cachedElevenLabsVoiceId;
+
+  if (config && typeof config.voiceId === 'string' && config.voiceId.trim()) {
+    const cleanVoice = sanitizeCredential(config.voiceId);
+    authoritativeElevenLabsConfig.voiceId = cleanVoice;
+    currentConfig.elevenLabsVoiceId = cleanVoice;
   }
+
   if (config && typeof config.model === 'string' && config.model.trim()) {
-    cachedElevenLabsModel = config.model.trim();
-    currentConfig.elevenLabsModel = cachedElevenLabsModel;
+    const cleanModel = sanitizeCredential(config.model);
+    authoritativeElevenLabsConfig.model = cleanModel;
+    currentConfig.elevenLabsModel = cleanModel;
   }
+
   await writeJsonFile('nexus_config.json', currentConfig);
+
   if (elevenLabsService) {
-    elevenLabsService.setCredentials(cachedElevenLabsApiKey, cachedElevenLabsVoiceId, cachedElevenLabsModel);
+    elevenLabsService.setCredentials(
+      authoritativeElevenLabsConfig.apiKey,
+      authoritativeElevenLabsConfig.voiceId,
+      authoritativeElevenLabsConfig.model
+    );
   }
   return { success: true };
 });
 
 ipcMain.handle('elevenlabs:test-connection', async (_event, customKey?: string, customVoiceId?: string) => {
   const cfg = await getEffectiveElevenLabsConfig();
-  const testService = new ElevenLabsService(customKey || cfg.apiKey, customVoiceId || cfg.voiceId, cfg.model);
-  return await testService.testConnection(customKey, customVoiceId);
+  const effectiveKey = (customKey && !isMaskedOrPlaceholderKey(customKey)) ? sanitizeCredential(customKey) : cfg.apiKey;
+  const effectiveVoice = (customVoiceId && customVoiceId.trim()) ? sanitizeCredential(customVoiceId) : cfg.voiceId;
+  const testService = new ElevenLabsService(effectiveKey, effectiveVoice, cfg.model);
+  return await testService.testConnection(effectiveKey, effectiveVoice);
 });
 
 ipcMain.handle('elevenlabs:synthesize', async (_event, { text, voiceId, modelId }: { text: string; voiceId?: string; modelId?: string }) => {
