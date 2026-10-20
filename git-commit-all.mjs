@@ -39,7 +39,7 @@ async function main() {
       name: 'NEXUS Agent',
       email: 'nexus@ai.local',
     },
-    message: 'feat(phase4): deterministic window, tab and document management, in-page search isolation, and truthful task status tracking',
+    message: 'feat(identity): add Pratyush creator attribution, developer bio, model disambiguation, and identity test suite',
   });
 
   console.log(`Successfully committed! Commit SHA: ${sha}`);

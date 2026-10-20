@@ -744,6 +744,28 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 </p>
               </div>
 
+              {/* Creator & Developer Attribution Card */}
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-blue-950/20 via-background-secondary to-purple-950/20 border border-blue-500/20 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-sm text-text-primary">
+                      About the Developer
+                    </span>
+                    <span className="text-[10px] font-mono px-2 py-0.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded font-medium">
+                      Creator
+                    </span>
+                  </div>
+                  <span className="text-xs font-semibold text-blue-300">Pratyush</span>
+                </div>
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  NEXUS was conceptualized and developed by <strong className="text-text-primary font-medium">Pratyush</strong>, an independent creator passionate about artificial intelligence, mathematics, science, and technology. Driven by curiosity and a vision of building a more intelligent and capable digital assistant, he designed NEXUS to bring conversational AI, voice interaction, browser automation, and computer control together in one unified system. With a focus on continuous improvement, reliability, and innovation, Pratyush aims to evolve NEXUS into an intelligent assistant capable of understanding complex tasks and helping people accomplish them efficiently. NEXUS represents his journey of experimentation, creativity, and the belief that powerful technology begins with a curious mind.
+                </p>
+                <div className="pt-2 border-t border-border-subtle/50 text-[11px] text-text-muted flex items-center justify-between">
+                  <span>Application Origin: Independent Creator Project</span>
+                  <span>Developed by: Pratyush</span>
+                </div>
+              </div>
+
               <div className="p-4 rounded-xl bg-background-secondary/60 border border-border-subtle space-y-2.5 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="text-text-secondary">AI Core</span>

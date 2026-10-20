@@ -155,6 +155,14 @@ export class TaskPlanner {
     const conversationalQuestions = /^(who are you|what can you do|what are your capabilities|why (?:you|can't you|can you not) speak|tell me a joke|how are you|thanks|thank you)[\s!.,?]*$/i;
     if (conversationalQuestions.test(trimmed)) return true;
 
+    // Creator, developer, and origin inquiries
+    const creatorQuestions = /\b(?:who\s+(?:created|developed|built|made|designed|authored|programmed)\s+(?:you|nexus|this(?:\s+app)?)|who\s+is\s+(?:your\s+)?(?:creator|developer|maker|author|builder)|who\s+should\s+get\s+credit|who\s+is\s+pratyush|tell\s+me\s+about\s+(?:your\s+)?(?:creator|developer))\b/i;
+    if (creatorQuestions.test(trimmed)) return true;
+
+    // Model inquiry questions
+    const modelQuestions = /\b(?:which|what)\s+(?:ai\s+)?model\s+(?:powers|runs|is\s+used\s+by|is\s+powering)\s+(?:you|nexus)\b/i;
+    if (modelQuestions.test(trimmed)) return true;
+
     // Speech-only test requests (e.g. "Hello NEXUS. Speak this sentence aloud.")
     if (/\b(?:speak this|speak aloud|say hello|test voice|voice test)\b/i.test(trimmed) && !trimmed.includes('http') && !/\b(open|search|download)\b/i.test(trimmed)) {
       return true;

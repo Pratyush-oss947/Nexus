@@ -204,6 +204,36 @@ export function sanitizeToolResultForModel(result: any, maxTextLength = 2000): R
   return sanitized;
 }
 
+export function isCreatorAttributionQuery(prompt: string): boolean {
+  const norm = (prompt || '').trim().toLowerCase().replace(/[?!.,]/g, '');
+  return /\b(?:who\s+(?:created|developed|built|made|designed|authored|programmed)\s+(?:you|nexus|this(?:\s+app)?)|who\s+is\s+(?:the\s+|your\s+)?(?:creator|developer|maker|author|builder)(?:\s+of\s+nexus)?|who\s+should\s+get\s+credit(?:\s+for\s+building\s+you)?|who\s+made\s+nexus|who\s+created\s+nexus|who\s+developed\s+nexus)\b/i.test(norm);
+}
+
+export function isModelInquiry(prompt: string): boolean {
+  const norm = (prompt || '').trim().toLowerCase();
+  return /\b(?:which|what)\s+(?:ai\s+)?model\s+(?:powers|runs|powering|is\s+used\s+by|is\s+powering|are\s+you\s+(?:using|running))\b/i.test(norm) ||
+         /\b(?:what|which)\s+(?:ai\s+)?model\s+are\s+you\s+(?:using|running)\b/i.test(norm) ||
+         (/\b(?:which|what)\s+(?:ai\s+)?model\b/i.test(norm) && /\b(?:power|run|use)\b/i.test(norm));
+}
+
+export function isAboutDeveloperInquiry(prompt: string): boolean {
+  const norm = (prompt || '').trim().toLowerCase();
+  return /\b(?:who\s+is\s+pratyush|tell\s+me\s+about\s+(?:pratyush|your\s+developer|your\s+creator)|about\s+the\s+developer)\b/i.test(norm);
+}
+
+export function getCreatorAttributionResponse(): string {
+  return "I was created and developed by Pratyush. I'm NEXUS, an independent AI assistant built by him. My capabilities are powered by the technologies and AI services integrated into me.";
+}
+
+export function getAboutDeveloperResponse(): string {
+  return "NEXUS was conceptualized and developed by Pratyush, an independent creator passionate about artificial intelligence, mathematics, science, and technology. Driven by curiosity and a vision of building a more intelligent and capable digital assistant, he designed NEXUS to bring conversational AI, voice interaction, browser automation, and computer control together in one unified system. With a focus on continuous improvement, reliability, and innovation, Pratyush aims to evolve NEXUS into an intelligent assistant capable of understanding complex tasks and helping people accomplish them efficiently. NEXUS represents his journey of experimentation, creativity, and the belief that powerful technology begins with a curious mind.";
+}
+
+export function getModelInquiryResponse(provider: string, model: string): string {
+  const cleanProvider = provider.toLowerCase() === 'ollama' ? 'Ollama' : 'Google Gemini';
+  return `I am currently powered by the ${model} model running on ${cleanProvider} for language processing and reasoning, integrated with ElevenLabs for voice synthesis. However, the NEXUS desktop application itself was created and developed by Pratyush.`;
+}
+
 export class AgentEngine {
   private browserService: BrowserService;
   private desktopService: DesktopService;
@@ -269,10 +299,30 @@ export class AgentEngine {
     const effectiveProvider: 'gemini' | 'ollama' =
       provider || (process.env.AI_PROVIDER === 'ollama' ? 'ollama' : 'gemini');
 
+    const effectiveModel =
+      effectiveProvider === 'ollama'
+        ? (modelName || process.env.OLLAMA_MODEL || 'qwen2.5:7b')
+        : (modelName || process.env.GEMINI_MODEL || 'gemini-2.5-flash');
+
     if (effectiveProvider === 'gemini' && !apiKey) {
+      if (isCreatorAttributionQuery(prompt)) {
+        const text = getCreatorAttributionResponse();
+        emit('SUCCESS', text);
+        return { success: true, text, steps: [], sources: [], verificationVerdict: 'VERIFIED' };
+      }
+      if (isAboutDeveloperInquiry(prompt)) {
+        const text = getAboutDeveloperResponse();
+        emit('SUCCESS', text);
+        return { success: true, text, steps: [], sources: [], verificationVerdict: 'VERIFIED' };
+      }
+      if (isModelInquiry(prompt)) {
+        const text = getModelInquiryResponse(effectiveProvider, effectiveModel);
+        emit('SUCCESS', text);
+        return { success: true, text, steps: [], sources: [], verificationVerdict: 'VERIFIED' };
+      }
       const err = 'Gemini API key is not configured. Please set GEMINI_API_KEY in .env or Settings.';
       emit('ERROR', err);
-      return { success: false, text: '', steps: [], sources: [], error: err };
+      return { success: false, text: '', steps: [], sources: [], error: err, verificationVerdict: 'FAILED' };
     }
 
     const isBackground = isBackgroundExecutionRequested(prompt, options.background);
@@ -375,7 +425,23 @@ Core Execution Rules:
      - 'activate_browser_tab': switch to an existing tab before performing tab-specific actions.
      - 'navigate_current_tab': strictly navigate the active tab only.
      - 'open_multiple_urls_in_tabs': open multiple distinct URLs into separate tabs.
-   - For searching on the current website: ALWAYS use 'search_current_site' (or 'browser_in_page_search') to stay on the current site rather than opening an external search engine.`;
+   - For searching on the current website: ALWAYS use 'search_current_site' (or 'browser_in_page_search') to stay on the current site rather than opening an external search engine.
+
+6. Identity & Creator Attribution:
+   - Your name is NEXUS (or NEXUS AI), an independent personal desktop AI assistant and computer-use agent for Windows.
+   - You were created and developed by Pratyush.
+   - When anyone asks "Who created you?", "Who is your developer?", "Who made NEXUS?", "Who should get credit for building you?", or similar questions about your origin, developer, or creator, answer naturally:
+     "I was created and developed by Pratyush. I'm NEXUS, an independent AI assistant built by him. My capabilities are powered by the technologies and AI services integrated into me."
+   - Always credit Pratyush as your creator and developer of the NEXUS application.
+   - Never claim that OpenAI, Google, Microsoft, or ElevenLabs created NEXUS. They are third-party technology or service providers whose APIs and models are utilized by NEXUS.
+   - If asked which AI model powers NEXUS, answer according to the provider and model actually configured at runtime:
+     * Current AI Provider: ${effectiveProvider.toUpperCase()}
+     * Current AI Model: ${effectiveModel}
+     * Speech / Voice Engine: ElevenLabs (Voice ID: hw70l6UiioXIpgpHCjP6, Model: eleven_multilingual_v2)
+   - About the Developer — Pratyush:
+     NEXUS was conceptualized and developed by Pratyush, an independent creator passionate about artificial intelligence, mathematics, science, and technology. Driven by curiosity and a vision of building a more intelligent and capable digital assistant, he designed NEXUS to bring conversational AI, voice interaction, browser automation, and computer control together in one unified system. With a focus on continuous improvement, reliability, and innovation, Pratyush aims to evolve NEXUS into an intelligent assistant capable of understanding complex tasks and helping people accomplish them efficiently. NEXUS represents his journey of experimentation, creativity, and the belief that powerful technology begins with a curious mind.
+   - Apply this identity consistently across text and voice responses.
+   - Do not hardcode the same answer for unrelated questions; respond normally and helpfully to all other coding, browsing, desktop, and task requests.`;
 
     // Initialize conversation history for Gemini
     const contents: any[] = [];
@@ -710,6 +776,19 @@ Core Execution Rules:
       // If no tools called, treat as direct textual response
       if (normalizedCalls.length === 0) {
         finalAnswer = directTextAnswer || 'Task completed.';
+        if (isCreatorAttributionQuery(prompt)) {
+          if (!finalAnswer.includes('Pratyush') || /trained by google|created by google|developed by google|trained by openai|created by openai/i.test(finalAnswer)) {
+            finalAnswer = getCreatorAttributionResponse();
+          }
+        } else if (isAboutDeveloperInquiry(prompt)) {
+          if (!finalAnswer.includes('Pratyush')) {
+            finalAnswer = getAboutDeveloperResponse();
+          }
+        } else if (isModelInquiry(prompt)) {
+          if (!finalAnswer.includes('Pratyush')) {
+            finalAnswer = getModelInquiryResponse(effectiveProvider, effectiveModel);
+          }
+        }
         const verification = TaskPlanner.verifyTaskCompletion(executionState);
         emit(verification.verified ? 'SUCCESS' : 'INFO', finalAnswer);
         logDiagnostic('DIRECT_ANSWER', { text: finalAnswer, verification });
