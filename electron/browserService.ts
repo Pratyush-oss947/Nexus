@@ -19,6 +19,16 @@ export interface BrowserActionResult {
   state?: string;
   detectedChallenge?: SecurityChallengeResult;
   forms?: DetectedForm[];
+  tabId?: string;
+  tabs?: BrowserTabInfo[];
+}
+
+export interface BrowserTabInfo {
+  id: string;
+  url: string;
+  title: string;
+  isActive: boolean;
+  pageIndex: number;
 }
 
 export interface DetectedFormField {
@@ -87,6 +97,17 @@ export class BrowserService {
   private desktopService: DesktopService | null = null;
   private isBackgroundMode = false;
   private recentDownloads: Array<{ filename: string; filePath: string; sizeBytes: number; timestamp: number }> = [];
+  private pageTabIds: Map<Page, string> = new Map();
+  private tabCounter = 1;
+
+  public getTabIdForPage(page: Page): string {
+    let id = this.pageTabIds.get(page);
+    if (!id) {
+      id = `tab-${this.tabCounter++}`;
+      this.pageTabIds.set(page, id);
+    }
+    return id;
+  }
 
   constructor(downloadsPath: string, desktopService?: DesktopService) {
     this.downloadsPath = downloadsPath;
@@ -163,12 +184,16 @@ export class BrowserService {
 
   // Setup listeners on pages for popups, close, and in-browser downloads
   private setupPageListeners(page: Page): void {
+    this.getTabIdForPage(page);
+
     page.on('popup', (popup) => {
+      this.getTabIdForPage(popup);
       this.page = popup;
       this.setupPageListeners(popup);
     });
 
     page.on('close', () => {
+      this.pageTabIds.delete(page);
       if (this.page === page) {
         const remaining = this.context?.pages().filter((p) => !p.isClosed()) || [];
         this.page = remaining.length > 0 ? remaining[remaining.length - 1] : null;
@@ -539,38 +564,365 @@ export class BrowserService {
     }
   }
 
-  // Action: Open new tab explicitly (only when genuinely requested)
-  public async newTab(rawUrl?: string): Promise<BrowserActionResult> {
+  // -------------------------------------------------------------
+  // BROWSER TAB MANAGEMENT
+  // -------------------------------------------------------------
+
+  /**
+   * Action: List all currently open browser tabs with stable identifiers, titles, and active status.
+   */
+  public async listBrowserTabs(): Promise<{
+    success: boolean;
+    tabs: BrowserTabInfo[];
+    totalTabs: number;
+    activeTabId?: string;
+    activeUrl?: string;
+    error?: string;
+  }> {
     try {
-      await this.ensurePage(); // guarantees context is created
+      await this.ensurePage();
+      if (!this.context) {
+        return { success: false, tabs: [], totalTabs: 0, error: 'No browser context active' };
+      }
+
+      const openPages = this.context.pages().filter((p) => !p.isClosed());
+      const tabs: BrowserTabInfo[] = [];
+
+      for (let i = 0; i < openPages.length; i++) {
+        const p = openPages[i];
+        const id = this.getTabIdForPage(p);
+        const url = p.url();
+        let title = '';
+        try {
+          title = await p.title();
+        } catch {}
+        const isActive = this.page === p;
+        tabs.push({
+          id,
+          url,
+          title,
+          isActive,
+          pageIndex: i,
+        });
+      }
+
+      const activeTabId = this.page ? this.getTabIdForPage(this.page) : undefined;
+      const activeUrl = this.page ? this.page.url() : undefined;
+
+      return {
+        success: true,
+        tabs,
+        totalTabs: tabs.length,
+        activeTabId,
+        activeUrl,
+      };
+    } catch (err: any) {
+      return { success: false, tabs: [], totalTabs: 0, error: `Failed to list tabs: ${err?.message || String(err)}` };
+    }
+  }
+
+  /**
+   * Alias for readPageContent
+   */
+  public async readVisibleText(): Promise<BrowserActionResult> {
+    return this.readPageContent();
+  }
+
+  /**
+   * Action: Create a new distinct browser tab without modifying existing tabs.
+   */
+  public async createBrowserTab(rawUrl?: string): Promise<BrowserActionResult & { tabId: string }> {
+    try {
+      await this.ensurePage();
       if (!this.context) throw new Error('Browser context not available');
 
+      const initialCount = this.getActivePagesCount();
       const newPage = await this.context.newPage();
+      const tabId = this.getTabIdForPage(newPage);
       this.page = newPage;
       this.setupPageListeners(newPage);
       newPage.setDefaultTimeout(5000);
       newPage.setDefaultNavigationTimeout(12000);
 
+      let finalUrl = newPage.url();
+      let finalTitle = '';
+
       if (rawUrl) {
-        return await this.navigate(rawUrl);
+        const check = this.validateUrl(rawUrl);
+        if (!check.valid || !check.normalizedUrl) {
+          return { success: false, action: 'create_browser_tab', error: check.error, tabId };
+        }
+        await newPage.goto(check.normalizedUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+        finalUrl = newPage.url();
+        finalTitle = await newPage.title().catch(() => '');
+      } else {
+        finalTitle = await newPage.title().catch(() => '');
       }
 
+      if (!this.isBackgroundMode) {
+        await newPage.bringToFront().catch(() => {});
+        await this.bringToForeground().catch(() => {});
+      }
+
+      const postCount = this.getActivePagesCount();
       const screenshot = await this.captureScreenshot();
+
       return {
         success: true,
-        action: 'new_tab',
-        url: newPage.url(),
-        title: await newPage.title(),
-        content: 'Opened new browser tab.',
+        action: 'create_browser_tab',
+        tabId,
+        url: finalUrl,
+        title: finalTitle,
+        content: `Created new browser tab (${tabId}) at ${finalUrl}${finalTitle ? ` ("${finalTitle}")` : ''}. Total open tabs: ${postCount}.`,
+        screenshotBase64: screenshot,
+        data: { tabId, openTabsCount: postCount, initialCount },
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        action: 'create_browser_tab',
+        tabId: '',
+        error: `Failed to create new tab: ${err?.message || String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Action: Activate a specific browser tab by ID (e.g. "tab-2"), index, or URL/title substring.
+   */
+  public async activateBrowserTab(tabIdOrQuery: string | number): Promise<BrowserActionResult & { tabId: string }> {
+    try {
+      await this.ensurePage();
+      if (!this.context) throw new Error('Browser context not available');
+
+      const openPages = this.context.pages().filter((p) => !p.isClosed());
+      let targetPage: Page | null = null;
+      let targetId = '';
+
+      if (typeof tabIdOrQuery === 'number') {
+        if (tabIdOrQuery >= 0 && tabIdOrQuery < openPages.length) {
+          targetPage = openPages[tabIdOrQuery];
+          targetId = this.getTabIdForPage(targetPage);
+        }
+      } else {
+        const queryStr = String(tabIdOrQuery).trim().toLowerCase();
+        // 1. Try exact tabId match
+        for (const p of openPages) {
+          const id = this.getTabIdForPage(p);
+          if (id.toLowerCase() === queryStr) {
+            targetPage = p;
+            targetId = id;
+            break;
+          }
+        }
+
+        // 2. Try URL match
+        if (!targetPage) {
+          for (const p of openPages) {
+            const u = p.url().toLowerCase();
+            if (u.includes(queryStr)) {
+              targetPage = p;
+              targetId = this.getTabIdForPage(p);
+              break;
+            }
+          }
+        }
+
+        // 3. Try Title match
+        if (!targetPage) {
+          for (const p of openPages) {
+            let t = '';
+            try { t = (await p.title()).toLowerCase(); } catch {}
+            if (t.includes(queryStr)) {
+              targetPage = p;
+              targetId = this.getTabIdForPage(p);
+              break;
+            }
+          }
+        }
+      }
+
+      if (!targetPage) {
+        return {
+          success: false,
+          action: 'activate_browser_tab',
+          tabId: '',
+          error: `Could not find an open browser tab matching "${tabIdOrQuery}". Use list_browser_tabs to view active tabs.`,
+        };
+      }
+
+      await targetPage.bringToFront();
+      this.page = targetPage;
+      if (!this.isBackgroundMode) {
+        await this.bringToForeground().catch(() => {});
+      }
+
+      const title = await targetPage.title().catch(() => '');
+      const screenshot = await this.captureScreenshot();
+
+      return {
+        success: true,
+        action: 'activate_browser_tab',
+        tabId: targetId,
+        url: targetPage.url(),
+        title,
+        content: `Activated tab ${targetId}: ${targetPage.url()} ("${title}").`,
         screenshotBase64: screenshot,
       };
     } catch (err: any) {
       return {
         success: false,
-        action: 'new_tab',
-        error: `Failed to open new tab: ${err?.message || String(err)}`,
+        action: 'activate_browser_tab',
+        tabId: '',
+        error: `Failed to activate tab: ${err?.message || String(err)}`,
       };
     }
+  }
+
+  /**
+   * Action: Navigate only the currently active tab without opening duplicate or new tabs.
+   */
+  public async navigateCurrentTab(rawUrl: string): Promise<BrowserActionResult> {
+    const check = this.validateUrl(rawUrl);
+    if (!check.valid || !check.normalizedUrl) {
+      return { success: false, action: 'navigate_current_tab', error: check.error };
+    }
+
+    try {
+      const page = await this.ensurePage();
+      const currentUrl = page.url();
+      const initialTabCount = this.getActivePagesCount();
+
+      // Check if already on the exact URL
+      const match = this.isSameSiteOrPage(currentUrl, check.normalizedUrl);
+      if (match.isMatch) {
+        if (!this.isBackgroundMode) {
+          await this.bringToForeground().catch(() => {});
+        }
+        const title = await page.title();
+        const screenshot = await this.captureScreenshot();
+        return {
+          success: true,
+          action: 'navigate_current_tab',
+          url: currentUrl,
+          title,
+          content: `Already on destination in current tab: ${currentUrl} ("${title}").`,
+          screenshotBase64: screenshot,
+          alreadyOnPage: true,
+        };
+      }
+
+      await page.goto(check.normalizedUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+      const newUrl = page.url();
+      const title = await page.title();
+
+      if (!this.isBackgroundMode) {
+        await page.bringToFront().catch(() => {});
+        await this.bringToForeground().catch(() => {});
+      }
+
+      const postTabCount = this.getActivePagesCount();
+      const screenshot = await this.captureScreenshot();
+
+      return {
+        success: true,
+        action: 'navigate_current_tab',
+        url: newUrl,
+        title,
+        content: `Navigated current tab to: ${newUrl} ("${title}"). Total tabs: ${postTabCount}.`,
+        screenshotBase64: screenshot,
+        data: { initialTabCount, postTabCount },
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        action: 'navigate_current_tab',
+        error: `Failed to navigate current tab: ${err?.message || String(err)}`,
+      };
+    }
+  }
+
+  /**
+   * Action: Create a new tab and navigate it to destination (preserves original tabs).
+   */
+  public async navigateNewTab(rawUrl: string): Promise<BrowserActionResult & { tabId: string }> {
+    return this.createBrowserTab(rawUrl);
+  }
+
+  /**
+   * Action: Open multiple URLs in distinct separate tabs and verify each one.
+   */
+  public async openMultipleUrlsInTabs(urls: string[]): Promise<BrowserActionResult & { tabs: BrowserTabInfo[] }> {
+    try {
+      if (!Array.isArray(urls) || urls.length === 0) {
+        return { success: false, action: 'open_multiple_urls_in_tabs', error: 'Array of URLs is required.', tabs: [] };
+      }
+
+      await this.ensurePage();
+      if (!this.context) throw new Error('Browser context not available');
+
+      const openedTabs: BrowserTabInfo[] = [];
+
+      for (let i = 0; i < urls.length; i++) {
+        const u = urls[i];
+        const check = this.validateUrl(u);
+        if (!check.valid || !check.normalizedUrl) {
+          return { success: false, action: 'open_multiple_urls_in_tabs', error: `Invalid URL at index ${i}: ${u}`, tabs: [] };
+        }
+
+        let targetPage: Page;
+        if (i === 0 && this.getActivePagesCount() === 1 && this.page && this.page.url() === 'about:blank') {
+          targetPage = this.page;
+        } else {
+          targetPage = await this.context.newPage();
+          this.setupPageListeners(targetPage);
+          targetPage.setDefaultTimeout(5000);
+          targetPage.setDefaultNavigationTimeout(12000);
+        }
+
+        const tabId = this.getTabIdForPage(targetPage);
+        await targetPage.goto(check.normalizedUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
+        const finalUrl = targetPage.url();
+        const finalTitle = await targetPage.title().catch(() => '');
+
+        openedTabs.push({
+          id: tabId,
+          url: finalUrl,
+          title: finalTitle,
+          isActive: i === urls.length - 1,
+          pageIndex: i,
+        });
+
+        this.page = targetPage;
+      }
+
+      if (!this.isBackgroundMode && this.page) {
+        await this.page.bringToFront().catch(() => {});
+        await this.bringToForeground().catch(() => {});
+      }
+
+      const screenshot = await this.captureScreenshot();
+
+      return {
+        success: true,
+        action: 'open_multiple_urls_in_tabs',
+        content: `Successfully opened ${openedTabs.length} URL(s) in separate tabs: ${openedTabs.map((t) => `${t.id}: ${t.url}`).join(', ')}`,
+        tabs: openedTabs,
+        screenshotBase64: screenshot,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        action: 'open_multiple_urls_in_tabs',
+        tabs: [],
+        error: `Failed to open multiple URLs in tabs: ${err?.message || String(err)}`,
+      };
+    }
+  }
+
+  // Compatibility alias for newTab
+  public async newTab(rawUrl?: string): Promise<BrowserActionResult> {
+    return this.createBrowserTab(rawUrl);
   }
 
   // Action: Generic In-Page Search using intelligent field discovery

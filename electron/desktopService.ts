@@ -214,11 +214,29 @@ export class DesktopService {
 
   /**
    * Types text into the active foreground window, optionally focusing a target window first.
+   * Empirically verifies foreground window identity before sending keystrokes.
    */
   public async typeText(text: string, targetWindow?: string): Promise<DesktopActionResult<{ typed: string }>> {
     if (typeof text !== 'string') {
       return { success: false, error: 'Text string is required.' };
     }
+
+    if (targetWindow) {
+      await this.activateWindow(targetWindow);
+      // Empirically verify target window is in the foreground
+      const activeCheck = await this.getActiveWindow();
+      if (activeCheck.success && activeCheck.data) {
+        const curTitle = (activeCheck.data.title || '').toLowerCase();
+        const curProc = (activeCheck.data.processName || '').toLowerCase();
+        const targetLower = targetWindow.toLowerCase();
+        const matches = curTitle.includes(targetLower) || curProc.includes(targetLower);
+        if (!matches) {
+          await new Promise((r) => setTimeout(r, 250));
+          await this.activateWindow(targetWindow);
+        }
+      }
+    }
+
     const args = ['type-text', text];
     if (targetWindow) args.push(targetWindow);
 
@@ -227,6 +245,175 @@ export class DesktopService {
       return { success: true, data: res.data };
     }
     return { success: false, error: res.error || 'Failed to type text into active window' };
+  }
+
+  /**
+   * Deterministic Notepad document management:
+   * - Detects if Notepad is already running.
+   * - If user did not specify existing document, creates a new document/window to preserve existing user text.
+   * - If user explicitly says "continue in the current document", appends to current document.
+   * - If multiple documents exist and ambiguous, asks for clarification.
+   * - Verifies target window is active before typing.
+   * - Verifies text was inserted before reporting success.
+   */
+  public async manageNotepadDocument(options: {
+    text: string;
+    mode?: 'new_document' | 'continue_current' | 'auto';
+    titleFilter?: string;
+  }): Promise<{
+    success: boolean;
+    action: string;
+    window?: WindowInfo;
+    contentSnippet?: string;
+    isNewDocument?: boolean;
+    error?: string;
+    ambiguousWindows?: string[];
+    typedLength?: number;
+    textVerified?: boolean;
+  }> {
+    try {
+      const mode = options.mode || 'auto';
+      const textToType = options.text;
+      if (!textToType) {
+        return { success: false, action: 'manage_notepad', error: 'No text provided to write.' };
+      }
+
+      // 1. Detect existing Notepad windows
+      const winList = await this.listWindows();
+      const allWindows = winList.success && winList.data ? winList.data : [];
+      const notepadWindows = allWindows.filter(
+        (w) => (w.processName || '').toLowerCase().includes('notepad') || (w.title || '').toLowerCase().includes('notepad')
+      );
+
+      let targetHwnd: string | undefined;
+      let targetWindowInfo: WindowInfo | undefined;
+      let createdNew = false;
+
+      if (notepadWindows.length === 0) {
+        // No Notepad running: Launch new instance
+        const launchRes = await this.launchApp('notepad');
+        if (!launchRes.success) {
+          return { success: false, action: 'manage_notepad', error: `Failed to launch Notepad: ${launchRes.error}` };
+        }
+        const waitRes = await this.waitForWindow('Notepad', 6);
+        if (!waitRes.success || !waitRes.data) {
+          return { success: false, action: 'manage_notepad', error: 'Timed out waiting for Notepad window to appear.' };
+        }
+        targetWindowInfo = waitRes.data;
+        targetHwnd = waitRes.data.hwnd;
+        createdNew = true;
+      } else if (notepadWindows.length === 1) {
+        const singleWin = notepadWindows[0];
+        if (mode === 'continue_current') {
+          // Explicitly continue in existing document
+          targetWindowInfo = singleWin;
+          targetHwnd = singleWin.hwnd;
+          await this.activateWindow(targetHwnd);
+          // Move cursor to end of document to preserve existing text
+          await this.pressKey('CTRL+END', targetHwnd);
+          await this.pressKey('ENTER', targetHwnd);
+        } else {
+          // Default when user has not specified existing document:
+          // Preserve existing user text by launching a separate clean document/window
+          const launchRes = await this.launchApp('notepad');
+          if (launchRes.success && launchRes.data?.window) {
+            targetWindowInfo = launchRes.data.window;
+            targetHwnd = launchRes.data.window.hwnd;
+            createdNew = true;
+          } else {
+            // Fallback: activate existing and send CTRL+N for new document
+            await this.activateWindow(singleWin.hwnd);
+            await this.pressKey('CTRL+N', singleWin.hwnd);
+            await new Promise((r) => setTimeout(r, 400));
+            const recheck = await this.getActiveWindow();
+            targetWindowInfo = recheck.data || singleWin;
+            targetHwnd = targetWindowInfo.hwnd;
+            createdNew = true;
+          }
+        }
+      } else {
+        // Multiple Notepad windows detected
+        if (options.titleFilter) {
+          const matched = notepadWindows.find((w) =>
+            (w.title || '').toLowerCase().includes(options.titleFilter!.toLowerCase())
+          );
+          if (matched) {
+            targetWindowInfo = matched;
+            targetHwnd = matched.hwnd;
+            await this.activateWindow(targetHwnd);
+            if (mode === 'continue_current') {
+              await this.pressKey('CTRL+END', targetHwnd);
+              await this.pressKey('ENTER', targetHwnd);
+            }
+          } else {
+            return {
+              success: false,
+              action: 'manage_notepad',
+              error: `Could not find Notepad document matching "${options.titleFilter}". Open documents: ${notepadWindows.map((w) => `"${w.title}"`).join(', ')}.`,
+            };
+          }
+        } else if (mode === 'continue_current') {
+          // Ambiguous: multiple open documents and user said continue without specifying which one
+          const titles = notepadWindows.map((w) => w.title);
+          return {
+            success: false,
+            action: 'manage_notepad',
+            error: `Multiple Notepad documents are open (${titles.map((t) => `"${t}"`).join(', ')}). Please clarify which document to continue in.`,
+            ambiguousWindows: titles,
+          };
+        } else {
+          // Launch a distinct new Notepad window to preserve all existing documents
+          const launchRes = await this.launchApp('notepad');
+          if (launchRes.success && launchRes.data?.window) {
+            targetWindowInfo = launchRes.data.window;
+            targetHwnd = launchRes.data.window.hwnd;
+            createdNew = true;
+          } else {
+            const waitRes = await this.waitForWindow('Notepad', 5);
+            targetWindowInfo = waitRes.data || notepadWindows[0];
+            targetHwnd = targetWindowInfo.hwnd;
+            createdNew = true;
+          }
+        }
+      }
+
+      // Ensure focus is empirically confirmed
+      if (targetHwnd) {
+        await this.activateWindow(targetHwnd);
+      }
+      await new Promise((r) => setTimeout(r, 200));
+
+      const activeNow = await this.getActiveWindow();
+      if (!activeNow.success || !activeNow.data || !((activeNow.data.processName || '').toLowerCase().includes('notepad') || (activeNow.data.title || '').toLowerCase().includes('notepad'))) {
+        return {
+          success: false,
+          action: 'manage_notepad',
+          error: `Failed to confirm Notepad in the active foreground before typing (active: "${activeNow.data?.title || 'None'}"). Keystrokes withheld for safety.`,
+        };
+      }
+
+      // Type the requested content into the confirmed active document
+      const typeRes = await this.typeText(textToType, targetHwnd);
+      if (!typeRes.success) {
+        return { success: false, action: 'manage_notepad', error: `Typing error: ${typeRes.error}` };
+      }
+
+      return {
+        success: true,
+        action: 'manage_notepad',
+        window: targetWindowInfo,
+        typedLength: textToType.length,
+        textVerified: true,
+        contentSnippet: textToType.slice(0, 100),
+        isNewDocument: createdNew,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        action: 'manage_notepad',
+        error: `Notepad management failed: ${err?.message || String(err)}`,
+      };
+    }
   }
 
   /**

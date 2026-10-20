@@ -39,7 +39,7 @@ async function main() {
       name: 'NEXUS Agent',
       email: 'nexus@ai.local',
     },
-    message: 'feat(phase3): secure login, intelligent form automation, domain-bound credential vault, and human-in-the-loop authorization',
+    message: 'feat(phase4): deterministic window, tab and document management, in-page search isolation, and truthful task status tracking',
   });
 
   console.log(`Successfully committed! Commit SHA: ${sha}`);

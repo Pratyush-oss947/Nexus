@@ -166,6 +166,151 @@ const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
     },
   },
 
+  list_browser_tabs: {
+    name: 'list_browser_tabs',
+    description: 'List all currently open browser tabs in the active automation session, including stable identifiers (e.g. "tab-1"), current URLs, titles, and which tab is active.',
+    riskLevel: 'LOW',
+    parameters: {
+      type: 'OBJECT',
+      properties: {},
+    },
+    handler: async (_args, ctx) => {
+      ctx.onEmitEvent('INFO', 'Listing browser tabs');
+      const res = await ctx.browserService.listBrowserTabs();
+      return res;
+    },
+  },
+
+  create_browser_tab: {
+    name: 'create_browser_tab',
+    description: 'Create a new distinct browser tab without modifying or replacing existing tabs. Optionally navigates the new tab to a destination URL.',
+    riskLevel: 'LOW',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        url: { type: 'STRING', description: 'Optional URL to open in the new tab' },
+      },
+    },
+    handler: async (args, ctx) => {
+      const url = args.url ? String(args.url).trim() : undefined;
+      ctx.onEmitEvent('INFO', `Creating new browser tab${url ? ` at ${url}` : ''}`);
+      const res = await ctx.browserService.createBrowserTab(url);
+      ctx.onEmitEvent('NAVIGATE', res.content || 'Created new browser tab', undefined, res.url);
+      return res;
+    },
+  },
+
+  activate_browser_tab: {
+    name: 'activate_browser_tab',
+    description: 'Switch to and activate an open browser tab by tab identifier (e.g. "tab-1", "tab-2"), index, or URL/title substring.',
+    riskLevel: 'LOW',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        tabIdOrQuery: { type: 'STRING', description: 'Tab ID (e.g. "tab-1"), 0-based index, or URL/title substring to activate' },
+      },
+      required: ['tabIdOrQuery'],
+    },
+    handler: async (args, ctx) => {
+      const query = String(args.tabIdOrQuery || args.tabId || args.query || args.target || '').trim();
+      ctx.onEmitEvent('INFO', `Activating browser tab matching: "${query}"`);
+      const res = await ctx.browserService.activateBrowserTab(query);
+      ctx.onEmitEvent(res.success ? 'INFO' : 'ERROR', res.content || res.error || 'Activated tab', undefined, res.url);
+      return res;
+    },
+  },
+
+  navigate_current_tab: {
+    name: 'navigate_current_tab',
+    description: 'Strictly navigate only the currently active browser tab to the requested URL without creating any new tabs.',
+    riskLevel: 'LOW',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        url: { type: 'STRING', description: 'Destination web URL to navigate the current tab to' },
+      },
+      required: ['url'],
+    },
+    handler: async (args, ctx) => {
+      const url = String(args.url || args.link || '').trim();
+      ctx.onEmitEvent('NAVIGATE', `Navigating current tab to: ${url}`, undefined, url);
+      const res = await ctx.browserService.navigateCurrentTab(url);
+      ctx.onEmitEvent(res.success ? 'NAVIGATE' : 'ERROR', res.content || res.error || 'Navigated current tab', undefined, res.url);
+      return res;
+    },
+  },
+
+  navigate_new_tab: {
+    name: 'navigate_new_tab',
+    description: 'Create a new browser tab and navigate it to the destination URL, keeping existing tabs intact.',
+    riskLevel: 'LOW',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        url: { type: 'STRING', description: 'Destination web URL to open in a new tab' },
+      },
+      required: ['url'],
+    },
+    handler: async (args, ctx) => {
+      const url = String(args.url || args.link || '').trim();
+      ctx.onEmitEvent('NAVIGATE', `Opening in new tab: ${url}`, undefined, url);
+      const res = await ctx.browserService.navigateNewTab(url);
+      ctx.onEmitEvent(res.success ? 'NAVIGATE' : 'ERROR', res.content || res.error || 'Opened new tab', undefined, res.url);
+      return res;
+    },
+  },
+
+  open_multiple_urls_in_tabs: {
+    name: 'open_multiple_urls_in_tabs',
+    description: 'Open multiple URLs into distinct separate browser tabs and verify each one.',
+    riskLevel: 'LOW',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        urls: {
+          type: 'ARRAY',
+          description: 'Array of absolute URLs to open in separate tabs (e.g. ["https://en.wikipedia.org", "https://www.amazon.com"])',
+          items: { type: 'STRING' },
+        },
+      },
+      required: ['urls'],
+    },
+    handler: async (args, ctx) => {
+      const rawUrls = Array.isArray(args.urls) ? args.urls : [];
+      ctx.onEmitEvent('NAVIGATE', `Opening ${rawUrls.length} URLs in separate tabs`);
+      const res = await ctx.browserService.openMultipleUrlsInTabs(rawUrls);
+      ctx.onEmitEvent(res.success ? 'NAVIGATE' : 'ERROR', res.content || res.error || 'Tabs opened', undefined, res.url);
+      return res;
+    },
+  },
+
+  desktop_write_notepad: {
+    name: 'desktop_write_notepad',
+    description: 'Manage Notepad documents deterministically: preserves existing user text, creates new document/window when needed, confirms focus before typing, and verifies text insertion.',
+    riskLevel: 'MODERATE',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        text: { type: 'STRING', description: 'The text or poem to write into Notepad' },
+        mode: { type: 'STRING', description: 'Operation mode: "new_document" (preserve existing by opening new), "continue_current" (append to existing), or "auto"' },
+        titleFilter: { type: 'STRING', description: 'Optional title substring to match specific Notepad document' },
+      },
+      required: ['text'],
+    },
+    handler: async (args, ctx) => {
+      const text = String(args.text || args.content || args.poem || '').trim();
+      const mode = args.mode as any;
+      const titleFilter = args.titleFilter ? String(args.titleFilter) : undefined;
+      ctx.onEmitEvent('INFO', `Writing to Notepad (${mode || 'auto'})...`);
+      const res = await ctx.desktopService.manageNotepadDocument({ text, mode, titleFilter });
+      ctx.onEmitEvent(
+        res.success ? 'SUCCESS' : 'ERROR',
+        res.success ? `Successfully typed into Notepad document (${res.isNewDocument ? 'new document created to preserve original text' : 'continued in active document'})` : (res.error || 'Notepad typing failed')
+      );
+      return res;
+    },
+  },
+
   // 2. Site-Internal Search by Intent
   search_current_site: {
     name: 'search_current_site',
@@ -1447,6 +1592,26 @@ const TOOL_ALIASES: Record<string, string> = {
   browser_login: 'browser_login',
   login: 'browser_login',
   auth_login: 'browser_login',
+
+  // Tab & Document Management aliases (Phase 4)
+  list_browser_tabs: 'list_browser_tabs',
+  list_tabs: 'list_browser_tabs',
+  get_tabs: 'list_browser_tabs',
+  create_browser_tab: 'create_browser_tab',
+  new_tab: 'create_browser_tab',
+  browser_new_tab: 'create_browser_tab',
+  open_new_tab: 'create_browser_tab',
+  activate_browser_tab: 'activate_browser_tab',
+  switch_tab: 'activate_browser_tab',
+  select_tab: 'activate_browser_tab',
+  focus_tab: 'activate_browser_tab',
+  navigate_current_tab: 'navigate_current_tab',
+  navigate_new_tab: 'navigate_new_tab',
+  open_multiple_urls_in_tabs: 'open_multiple_urls_in_tabs',
+  open_tabs: 'open_multiple_urls_in_tabs',
+  desktop_write_notepad: 'desktop_write_notepad',
+  write_notepad: 'desktop_write_notepad',
+  notepad_write: 'desktop_write_notepad',
 };
 
 export class ToolDispatcher {
@@ -1459,6 +1624,12 @@ export class ToolDispatcher {
       'fill_form',
       'smart_fill_form',
       'browser_login',
+      'list_browser_tabs',
+      'create_browser_tab',
+      'activate_browser_tab',
+      'navigate_current_tab',
+      'navigate_new_tab',
+      'open_multiple_urls_in_tabs',
       'click_control',
       'download_result',
       'browser_bring_to_front',
@@ -1484,6 +1655,7 @@ export class ToolDispatcher {
       'computer_activate_window',
       'computer_type_text',
       'computer_press_key',
+      'desktop_write_notepad',
       'system_open_settings',
       'explorer_open_folder',
       'finish_task',
@@ -1509,6 +1681,12 @@ export class ToolDispatcher {
       'fill_form',
       'smart_fill_form',
       'browser_login',
+      'list_browser_tabs',
+      'create_browser_tab',
+      'activate_browser_tab',
+      'navigate_current_tab',
+      'navigate_new_tab',
+      'open_multiple_urls_in_tabs',
       'click_control',
       'download_result',
       'browser_read_visible_text',
@@ -1533,6 +1711,7 @@ export class ToolDispatcher {
       'computer_activate_window',
       'computer_type_text',
       'computer_press_key',
+      'desktop_write_notepad',
       'system_open_settings',
       'explorer_open_folder',
       'finish_task',
@@ -1624,6 +1803,18 @@ export class ToolDispatcher {
     } else if (resolvedName === 'computer_type_text') {
       if (args.text === undefined && args.value !== undefined) {
         args.text = args.value;
+      }
+    } else if (resolvedName === 'activate_browser_tab') {
+      if (!args.tabIdOrQuery && (args.tabId || args.tab_id || args.query || args.target)) {
+        args.tabIdOrQuery = args.tabId || args.tab_id || args.query || args.target;
+      }
+    } else if (resolvedName === 'navigate_current_tab' || resolvedName === 'navigate_new_tab') {
+      if (!args.url && args.link) {
+        args.url = args.link;
+      }
+    } else if (resolvedName === 'desktop_write_notepad') {
+      if (!args.text && (args.content || args.body || args.poem || args.message)) {
+        args.text = args.content || args.body || args.poem || args.message;
       }
     }
 

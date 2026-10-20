@@ -364,7 +364,18 @@ Core Execution Rules:
    - Seamlessly support English and Hindi/Hinglish phrasing.
    - When the user asks you to speak, or asks "why you cant speak" or whether you can speak, confirm that you have ElevenLabs AI Voice integration configured.
    - Your responses are converted to speech automatically by the ElevenLabs voice engine when voice mode is enabled.
-   - NEVER state that you are purely text-based or that you cannot speak. Reflect your actual ElevenLabs voice system status.`;
+   - NEVER state that you are purely text-based or that you cannot speak. Reflect your actual ElevenLabs voice system status.
+
+5. Window, Tab, and Document Management:
+   - For writing text, poems, or notes into Notepad: ALWAYS use 'desktop_write_notepad' (mode: 'new_document' to preserve existing user text by default, or 'continue_current' if user explicitly requested to continue in the current document).
+     Never blindly type into Notepad without verifying active foreground focus.
+   - For browser tabs:
+     - 'list_browser_tabs': view open tabs with their IDs, URLs, and titles.
+     - 'create_browser_tab' / 'navigate_new_tab': open a URL in a new distinct tab without modifying existing tabs.
+     - 'activate_browser_tab': switch to an existing tab before performing tab-specific actions.
+     - 'navigate_current_tab': strictly navigate the active tab only.
+     - 'open_multiple_urls_in_tabs': open multiple distinct URLs into separate tabs.
+   - For searching on the current website: ALWAYS use 'search_current_site' (or 'browser_in_page_search') to stay on the current site rather than opening an external search engine.`;
 
     // Initialize conversation history for Gemini
     const contents: any[] = [];

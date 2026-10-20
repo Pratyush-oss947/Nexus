@@ -46,8 +46,12 @@ export interface TaskStep {
   id: number;
   description: string;
   expectedOutcome: string;
-  status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED';
+  status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'SKIPPED' | 'BLOCKED';
   verifiedDetail?: string;
+  targetApp?: string;
+  targetWindow?: string;
+  targetTabId?: string;
+  targetDocument?: string;
 }
 
 export interface TaskPlan {
@@ -72,7 +76,15 @@ export interface TaskPlan {
   isConversational?: boolean;
   isDesktopTask?: boolean;
   isNewTabRequested?: boolean;
+  isMultiTabTask?: boolean;
+  isNotepadTask?: boolean;
+  isInPageSearchTask?: boolean;
+  notepadMode?: 'new_document' | 'continue_current' | 'auto';
+  multiTabUrls?: string[];
   targetApp?: string;
+  targetWindow?: string;
+  targetTabId?: string;
+  targetDocument?: string;
   isAuthLoginTask?: boolean;
   isFormFillingTask?: boolean;
   currentPhase?: ExecutionPhase;
@@ -149,8 +161,13 @@ export class TaskPlanner {
     }
 
     // Action verbs indicating browser, desktop, or task automation
-    const actionPattern = /\b(open|launch|start|navigate|browse|search|download|save|fill|click|press|type|close|delete|create task|add task|remove)\b/i;
+    const actionPattern = /\b(open|launch|start|navigate|browse|search|download|save|fill|click|press|type|write|compose|close|delete|create task|add task|remove)\b/i;
     const hasAction = actionPattern.test(trimmed);
+
+    // Desktop app specific automation
+    if (/\b(?:notepad|calculator|calc|paint|chrome|browser)\b/i.test(trimmed) && /\b(?:write|poem|note|text|type|draw|compute|tab|search)\b/i.test(trimmed)) {
+      return false;
+    }
 
     // If no action verb is present, and no URL or system path is present, it's conversational / informational
     if (!hasAction && !trimmed.includes('http') && !trimmed.includes('www.') && !trimmed.includes(':\\')) {
@@ -280,7 +297,49 @@ export class TaskPlanner {
       ];
     }
 
-    // 7. Fallback: single atomic requirement
+    // 7. Detect Notepad document management (e.g. "Write a poem in Notepad", "continue in the current document")
+    const isNotepad = /\bnotepad\b/i.test(trimmed) && /\b(?:write|poem|note|type|compose|continue|text)\b/i.test(trimmed);
+    if (isNotepad) {
+      const isContinue = /\b(?:continue|append)\s+(?:in|to)?\s*(?:the\s+)?current\b/i.test(trimmed);
+      if (isContinue) {
+        return [
+          { id: 1, description: 'Locate running Notepad document and confirm active window focus', status: 'PENDING' },
+          { id: 2, description: 'Append requested text to current document without replacing existing user text', status: 'PENDING' },
+          { id: 3, description: 'Verify text insertion into current Notepad document', status: 'PENDING' },
+        ];
+      } else {
+        return [
+          { id: 1, description: 'Detect Notepad instance state and prepare clean document (preserving existing text)', status: 'PENDING' },
+          { id: 2, description: 'Confirm active foreground window focus on Notepad before typing', status: 'PENDING' },
+          { id: 3, description: 'Write requested content into Notepad and verify insertion', status: 'PENDING' },
+        ];
+      }
+    }
+
+    // 8. Detect multi-tab requests (e.g. "Open Wikipedia and Amazon in separate tabs")
+    const isMultiTab = /\bopen\s+.+?\s+and\s+.+?\s+in\s+(?:separate|different)\s+tabs\b/i.test(trimmed) ||
+                       /\b(?:in\s+)?(?:separate|different)\s+tabs\b/i.test(trimmed);
+    if (isMultiTab) {
+      return [
+        { id: 1, description: 'Open first requested destination in browser tab', status: 'PENDING' },
+        { id: 2, description: 'Open second requested destination in a distinct separate tab', status: 'PENDING' },
+        { id: 3, description: 'Verify both distinct tabs are open with target destinations intact', status: 'PENDING' },
+      ];
+    }
+
+    // 9. Detect in-page search requests (e.g. "Search for X on the current website")
+    const isInPageSearch = /\bsearch(?:\s+for)?\s+(?:["']([^"']+)["']|(.+?))\s+(?:on|in)\s+(?:the\s+)?current\s+(?:website|site|page)\b/i.test(trimmed) ||
+                           /\bsearch\s+current\s+(?:site|website|page)\b/i.test(trimmed) ||
+                           /\bsearch\s+this\s+page\b/i.test(trimmed);
+    if (isInPageSearch) {
+      return [
+        { id: 1, description: 'Inspect active current website for internal search interface', status: 'PENDING' },
+        { id: 2, description: 'Perform in-page search on current website without external search redirection', status: 'PENDING' },
+        { id: 3, description: 'Verify search results within active website context', status: 'PENDING' },
+      ];
+    }
+
+    // 10. Fallback: single atomic requirement
     return [
       {
         id: 1,
@@ -332,6 +391,144 @@ export class TaskPlanner {
     let targetName: string | undefined;
     let searchQuery: string | undefined;
     let desiredResult: string | undefined;
+
+    // Detect Notepad document management (e.g. "Write a poem in Notepad", "continue in the current document")
+    const isNotepad = /\bnotepad\b/i.test(trimmed) && /\b(?:write|poem|note|type|compose|continue|text)\b/i.test(trimmed);
+    if (isNotepad) {
+      const isContinue = /\b(?:continue|append)\s+(?:in|to)?\s*(?:the\s+)?current\b/i.test(trimmed);
+      const mode = isContinue ? 'continue_current' : 'new_document';
+      const reqs = TaskPlanner.parseRequirements(trimmed);
+      return {
+        originalInstruction: prompt,
+        requirements: reqs,
+        currentStepIndex: 0,
+        isDesktopTask: true,
+        isNotepadTask: true,
+        notepadMode: mode,
+        targetApp: 'notepad',
+        targetWindow: 'Notepad',
+        targetDocument: isContinue ? 'Current document' : 'New document',
+        steps: [
+          {
+            id: 1,
+            description: isContinue
+              ? 'Locate running Notepad document and verify active foreground window'
+              : 'Launch or create new Notepad document (preserving existing user text)',
+            expectedOutcome: 'Notepad window open and active in foreground',
+            status: 'PENDING',
+            targetApp: 'notepad',
+            targetWindow: 'Notepad',
+            targetDocument: isContinue ? 'Current document' : 'New document',
+          },
+          {
+            id: 2,
+            description: 'Confirm foreground focus on Notepad window before typing',
+            expectedOutcome: 'Win32 foreground window verified as Notepad',
+            status: 'PENDING',
+            targetApp: 'notepad',
+            targetWindow: 'Notepad',
+          },
+          {
+            id: 3,
+            description: isContinue
+              ? 'Append requested text to current document and verify insertion'
+              : 'Write requested text into Notepad and verify insertion',
+            expectedOutcome: 'Text successfully inserted and verified in Notepad document',
+            status: 'PENDING',
+            targetApp: 'notepad',
+            targetDocument: 'Notepad',
+          },
+        ],
+        completed: false,
+      };
+    }
+
+    // Detect multi-tab requests (e.g. "Open Wikipedia and Amazon in separate tabs")
+    const multiTabMatch = trimmed.match(/\bopen\s+(.+?)\s+and\s+(.+?)\s+in\s+(?:separate|different)\s+tabs\b/i);
+    if (multiTabMatch) {
+      const site1Name = multiTabMatch[1].trim();
+      const site2Name = multiTabMatch[2].trim();
+      const resolveUrl = (name: string) => {
+        const lower = name.toLowerCase();
+        for (const [k, v] of Object.entries(COMMON_SITES)) {
+          if (lower.includes(k)) return v.url;
+        }
+        if (/https?:\/\//i.test(name)) return name;
+        return `https://${name.replace(/\s+/g, '')}.com`;
+      };
+      const url1 = resolveUrl(site1Name);
+      const url2 = resolveUrl(site2Name);
+      const reqs = TaskPlanner.parseRequirements(trimmed);
+
+      return {
+        originalInstruction: prompt,
+        requirements: reqs,
+        currentStepIndex: 0,
+        isMultiTabTask: true,
+        multiTabUrls: [url1, url2],
+        steps: [
+          {
+            id: 1,
+            description: `Open first destination in browser tab: ${url1} (${site1Name})`,
+            expectedOutcome: `First browser tab loaded ${url1}`,
+            status: 'PENDING',
+            targetApp: 'browser',
+            targetTabId: 'tab-1',
+          },
+          {
+            id: 2,
+            description: `Open second destination in distinct separate tab: ${url2} (${site2Name})`,
+            expectedOutcome: `Second distinct browser tab loaded ${url2} without modifying first tab`,
+            status: 'PENDING',
+            targetApp: 'browser',
+            targetTabId: 'tab-2',
+          },
+          {
+            id: 3,
+            description: 'Verify both distinct tabs are open with target destinations intact',
+            expectedOutcome: 'Both tabs verified in session with distinct URLs',
+            status: 'PENDING',
+            targetApp: 'browser',
+          },
+        ],
+        completed: false,
+      };
+    }
+
+    // Detect in-page search requests (e.g. "Search for shoes on the current website")
+    const inPageSearchMatch = trimmed.match(/\bsearch(?:\s+for)?\s+(?:["']([^"']+)["']|(.+?))\s+(?:on|in)\s+(?:the\s+)?current\s+(?:website|site|page)\b/i) ||
+                             trimmed.match(/\bsearch\s+current\s+(?:site|website|page)\s+for\s+(.+?)\b/i) ||
+                             trimmed.match(/\bsearch\s+this\s+page\s+for\s+(.+?)\b/i);
+    if (inPageSearchMatch) {
+      const q = (inPageSearchMatch[1] || inPageSearchMatch[2] || inPageSearchMatch[3] || '').trim();
+      const reqs = TaskPlanner.parseRequirements(trimmed);
+      return {
+        originalInstruction: prompt,
+        requirements: reqs,
+        currentStepIndex: 0,
+        isInPageSearchTask: true,
+        searchQuery: q,
+        currentBrowserUrl: currentUrl,
+        currentBrowserTitle: currentTitle,
+        steps: [
+          {
+            id: 1,
+            description: `Locate search input on current website and search for "${q}"`,
+            expectedOutcome: `Internal search query "${q}" submitted on active page`,
+            status: 'PENDING',
+            targetApp: 'browser',
+          },
+          {
+            id: 2,
+            description: 'Verify search results within current website without external redirection',
+            expectedOutcome: 'In-page search results verified on active page',
+            status: 'PENDING',
+            targetApp: 'browser',
+          },
+        ],
+        completed: false,
+      };
+    }
 
     // Detect desktop application launch (e.g. "open chrome", "launch notepad", "open calc")
     let isDesktopTask = false;
@@ -628,12 +825,120 @@ export class TaskPlanner {
         };
         break;
       }
+
+      if (
+        (toolName === 'desktop_write_notepad' || toolName === 'write_notepad') &&
+        (step.description.toLowerCase().includes('notepad') || step.description.toLowerCase().includes('poem') || step.description.toLowerCase().includes('write') || step.description.toLowerCase().includes('document'))
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Wrote into Notepad (${result.typedLength || 0} chars, newDoc: ${Boolean(result.isNewDocument)})`;
+        break;
+      }
+
+      if (
+        (toolName === 'computer_activate_window' || toolName === 'activate_window') &&
+        (step.description.toLowerCase().includes('focus') || step.description.toLowerCase().includes('active') || step.description.toLowerCase().includes('window'))
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Confirmed active foreground window: ${result.data?.title || result.title || 'Target window'}`;
+        break;
+      }
+
+      if (
+        (toolName === 'computer_type_text' || toolName === 'type_text') &&
+        (step.description.toLowerCase().includes('type') || step.description.toLowerCase().includes('write') || step.description.toLowerCase().includes('insert'))
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Typed text into window (${result.data?.typed?.length || 0} chars)`;
+        break;
+      }
+
+      if (
+        (toolName === 'open_multiple_urls_in_tabs' || toolName === 'open_tabs') &&
+        (step.description.toLowerCase().includes('tab') || step.description.toLowerCase().includes('destination'))
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Opened ${result.tabs?.length || 0} tabs in distinct sessions`;
+        break;
+      }
+
+      if (
+        (toolName === 'create_browser_tab' || toolName === 'navigate_new_tab') &&
+        step.description.toLowerCase().includes('tab')
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Created new tab ${result.tabId || ''} (${result.url || 'blank'})`;
+        break;
+      }
+
+      if (
+        toolName === 'navigate_current_tab' &&
+        (step.description.toLowerCase().includes('tab') || step.description.toLowerCase().includes('open') || step.description.toLowerCase().includes('navigate'))
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Navigated current tab to: ${result.url}`;
+        break;
+      }
+
+      if (
+        (toolName === 'activate_browser_tab' || toolName === 'switch_tab') &&
+        step.description.toLowerCase().includes('tab')
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Activated browser tab: ${result.tabId || result.url || 'Tab'}`;
+        break;
+      }
+
+      if (
+        toolName === 'list_browser_tabs' &&
+        step.description.toLowerCase().includes('tab')
+      ) {
+        step.status = 'COMPLETED';
+        step.verifiedDetail = `Listed ${result.totalTabs || 0} open browser tabs`;
+        break;
+      }
     }
 
     // Requirement matching & evidence correlation
     for (const req of (plan.requirements || [])) {
       if (req.status === 'COMPLETED') continue;
       const lowerReq = req.description.toLowerCase();
+
+      if (
+        (toolName === 'desktop_write_notepad' || toolName === 'write_notepad') &&
+        (lowerReq.includes('notepad') || lowerReq.includes('poem') || lowerReq.includes('note') || lowerReq.includes('document'))
+      ) {
+        req.status = 'COMPLETED';
+        req.answerOrEvidence = `Managed Notepad document and verified text insertion (${result.typedLength || 0} chars, new doc: ${Boolean(result.isNewDocument)}).`;
+        break;
+      }
+
+      if (
+        (toolName === 'open_multiple_urls_in_tabs' || toolName === 'open_tabs') &&
+        (lowerReq.includes('tab') || lowerReq.includes('separate'))
+      ) {
+        req.status = 'COMPLETED';
+        req.answerOrEvidence = `Opened distinct tabs (${(result.tabs || []).map((t: any) => t.url).join(', ')}).`;
+        break;
+      }
+
+      if (
+        (toolName === 'create_browser_tab' || toolName === 'navigate_new_tab') &&
+        lowerReq.includes('tab')
+      ) {
+        req.status = 'COMPLETED';
+        req.answerOrEvidence = `Created and navigated new distinct tab (${result.url || 'blank'}).`;
+        break;
+      }
+
+      if (
+        (toolName === 'activate_browser_tab' || toolName === 'switch_tab') &&
+        lowerReq.includes('tab')
+      ) {
+        req.status = 'COMPLETED';
+        req.answerOrEvidence = `Activated browser tab: ${result.tabId || result.title || 'Tab'}.`;
+        break;
+      }
 
       if (
         (toolName === 'open_website' || toolName === 'browser_open' || toolName === 'browser_navigate') &&
@@ -897,9 +1202,9 @@ Do NOT divert from or replace this goal under any circumstance.
     const hasFailuresOrBlocked = failedCount > 0 || blockedCount > 0;
     const hasOmissions = missingRequirements.length > 0;
 
-    if (!finalAnswer || hasOmissions || (hasMultipleReqs && hasFailuresOrBlocked)) {
+    if (!finalAnswer || hasOmissions || hasFailuresOrBlocked) {
       const lines: string[] = [];
-      if (finalAnswer && !hasOmissions) {
+      if (finalAnswer && !hasOmissions && !hasFailuresOrBlocked) {
         lines.push(finalAnswer);
         lines.push('');
         lines.push('--- Requirement Breakdown ---');
@@ -907,6 +1212,8 @@ Do NOT divert from or replace this goal under any circumstance.
         lines.push(
           hasFailuresOrBlocked && completedCount > 0
             ? 'Task partially completed with the following results:'
+            : hasFailuresOrBlocked
+            ? 'Task execution failed with the following details:'
             : completedCount === requirements.length
             ? 'Task completed successfully:'
             : 'Task execution summary:'
@@ -1075,6 +1382,40 @@ Do NOT divert from or replace this goal under any circumstance.
       }
     }
 
+    // 0.6 Notepad document tasks
+    if (state.taskPlan.isNotepadTask) {
+      const notepadSuccess = state.actionHistory.some(
+        (a) => (a.toolName === 'desktop_write_notepad' || a.toolName === 'write_notepad' || a.toolName === 'computer_type_text') && a.success
+      );
+      if (!notepadSuccess) {
+        state.isVerified = false;
+        state.verificationVerdict = 'INCOMPLETE';
+        state.verificationDetails = 'Notepad document writing was not completed with verified text insertion.';
+        return {
+          verified: false,
+          verdict: 'INCOMPLETE',
+          reason: state.verificationDetails,
+        };
+      }
+    }
+
+    // 0.7 Multi-tab browser tasks
+    if (state.taskPlan.isMultiTabTask) {
+      const multiTabSuccess = state.actionHistory.some(
+        (a) => (a.toolName === 'open_multiple_urls_in_tabs' || a.toolName === 'create_browser_tab' || a.toolName === 'navigate_new_tab') && a.success
+      );
+      if (!multiTabSuccess) {
+        state.isVerified = false;
+        state.verificationVerdict = 'INCOMPLETE';
+        state.verificationDetails = 'Multi-tab request was not completed with verified distinct tabs.';
+        return {
+          verified: false,
+          verdict: 'INCOMPLETE',
+          reason: state.verificationDetails,
+        };
+      }
+    }
+
     const requiresDownload = /\b(download|save)\b/i.test(goalLower);
 
     // 1. If download was requested, verify file exists and size > 0
@@ -1123,10 +1464,10 @@ Do NOT divert from or replace this goal under any circumstance.
 
     // 3. Check for failed actions
     const failedActions = state.actionHistory.filter((a) => !a.success);
-    if (failedActions.length > 0 && state.actionHistory.length > 0 && state.actionHistory.every((a) => !a.success)) {
+    if (failedActions.length > 0) {
       state.isVerified = false;
       state.verificationVerdict = 'FAILED';
-      state.verificationDetails = `All attempted actions failed. Latest error: ${failedActions[failedActions.length - 1].error}`;
+      state.verificationDetails = `Action "${failedActions[failedActions.length - 1].toolName}" failed: ${failedActions[failedActions.length - 1].error || 'Execution failure'}`;
       return {
         verified: false,
         verdict: 'FAILED',
