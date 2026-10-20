@@ -1,0 +1,20 @@
+# Node and Build Output
+node_modules/
+dist/
+dist-electron/
+release/
+
+# Screenshots and Artifacts
+screenshots/
+test-screenshots/
+
+# Environment and Secrets (CRITICAL: Never commit API keys)
+.env
+.env.local
+.env.*.local
+*.log
+
+# OS Metadata
+.DS_Store
+Thumbs.db
+

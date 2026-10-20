@@ -1,0 +1,82 @@
+{
+  "name": "nexus-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "NEXUS AI - Desktop UI Foundation",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev:renderer": "vite",
+    "dev:electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
+    "dev": "concurrently -k \"npm run dev:renderer\" \"npm run build:electron:watch\" \"npm run dev:electron\"",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build:electron:watch": "tsc -p electron/tsconfig.json --watch --preserveWatchOutput",
+    "build:renderer": "tsc && vite build",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "cross-env NODE_ENV=production electron .",
+    "preview": "npm run build && npm run start",
+    "typecheck": "tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
+    "test": "node test-master-suite.mjs",
+    "package:dir": "npm run build && electron-builder --win --dir",
+    "package:exe": "npm run build && electron-builder --win",
+    "package": "npm run build && electron-builder --win"
+  },
+  "build": {
+    "appId": "com.nexus.ai.desktop",
+    "productName": "NEXUS AI",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-electron/nexus-desktop-helper.exe",
+        "to": "nexus-desktop-helper.exe"
+      }
+    ],
+    "asarUnpack": [
+      "**/nexus-desktop-helper.exe"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "executableName": "NEXUS-AI"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "@google/genai": "^2.30.0",
+    "dotenv": "^18.0.8",
+    "isomorphic-git": "^1.44.3",
+    "lucide-react": "^0.453.0",
+    "playwright": "^1.64.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.2",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^9.0.1",
+    "cross-env": "^7.0.3",
+    "electron": "^32.2.0",
+    "electron-builder": "^26.15.3",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.8",
+    "wait-on": "^8.0.1"
+  }
+}
