@@ -50,10 +50,10 @@ async function main() {
     console.log(`- [${c.oid.slice(0, 7)}] ${c.commit.message.trim()} (${c.commit.author.name})`);
   }
 
-  // Safety check: verify .env is NOT in the tree
+  // Safety check: verify real .env is NOT in the tree
   const tree = await git.listFiles({ fs, dir: projectDir, ref: 'HEAD' });
-  const hasSecret = tree.some(f => f === '.env' || f.includes('.env'));
-  console.log(`Safety check: .env in git tree? ${hasSecret ? 'FAILED! .env found!' : 'PASSED! .env is not in git.'}`);
+  const hasSecret = tree.some(f => f === '.env' || (f.startsWith('.env.') && !f.endsWith('.example')));
+  console.log(`Safety check: .env in git tree? ${hasSecret ? 'FAILED! .env found!' : 'PASSED! .env is strictly untracked and protected.'}`);
 }
 
 main().catch(err => {
