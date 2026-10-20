@@ -298,7 +298,9 @@ ipcMain.handle('gemini:set-key', async (_event, apiKey: string) => {
   }
   const trimmed = apiKey.trim();
   cachedApiKey = trimmed;
-  await writeJsonFile('nexus_config.json', { apiKey: trimmed });
+  const currentConfig = await readJsonFile<Record<string, any>>('nexus_config.json', {});
+  currentConfig.apiKey = trimmed;
+  await writeJsonFile('nexus_config.json', currentConfig);
   return { success: true, hasApiKey: trimmed.length > 0 };
 });
 
