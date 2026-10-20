@@ -1,6 +1,28 @@
 import * as path from 'path';
 
-export type RequirementStatus = 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED' | 'BLOCKED';
+export type RequirementStatus =
+  | 'PENDING'
+  | 'IN_PROGRESS'
+  | 'INSPECTING'
+  | 'AWAITING_CREDENTIALS'
+  | 'FILLING'
+  | 'AWAITING_CONFIRMATION'
+  | 'SUBMITTING'
+  | 'VERIFYING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'BLOCKED';
+
+export type ExecutionPhase =
+  | 'inspecting'
+  | 'awaiting_credentials'
+  | 'filling'
+  | 'awaiting_confirmation'
+  | 'submitting'
+  | 'verifying'
+  | 'completed'
+  | 'failed'
+  | 'blocked';
 
 export interface TaskRequirement {
   id: number;
@@ -51,6 +73,10 @@ export interface TaskPlan {
   isDesktopTask?: boolean;
   isNewTabRequested?: boolean;
   targetApp?: string;
+  isAuthLoginTask?: boolean;
+  isFormFillingTask?: boolean;
+  currentPhase?: ExecutionPhase;
+  blockerReason?: string;
 }
 
 export interface ActionOutcomeRecord {
@@ -82,9 +108,11 @@ export interface TaskExecutionState {
   actionHistory: ActionOutcomeRecord[];
   consequentialActionsExecuted: Set<string>;
   isVerified: boolean;
-  verificationVerdict: 'VERIFIED' | 'INCOMPLETE' | 'FAILED';
+  verificationVerdict: 'VERIFIED' | 'INCOMPLETE' | 'FAILED' | 'BLOCKED';
   verificationDetails?: string;
-  status: 'RUNNING' | 'COMPLETED' | 'INCOMPLETE' | 'FAILED' | 'CANCELLED';
+  status: 'RUNNING' | 'COMPLETED' | 'INCOMPLETE' | 'FAILED' | 'CANCELLED' | 'BLOCKED' | 'AWAITING_CONFIRMATION';
+  currentPhase?: ExecutionPhase;
+  blockerReason?: string;
 }
 
 const COMMON_SITES: Record<string, { url: string; name: string }> = {
@@ -231,7 +259,28 @@ export class TaskPlanner {
       if (requirements.length >= 2) return requirements;
     }
 
-    // 5. Fallback: single atomic requirement
+    // 5. Detect authorized login requests (e.g. "Open example.com and log in using credentials")
+    if (/\b(?:log\s*in|login|sign\s*in|authenticate)\b/i.test(trimmed) && (hints?.targetWebsite || /https?:\/\/|[a-z0-9-]+\.(?:com|org|net|io|dev|app)/i.test(trimmed))) {
+      const site = hints?.targetWebsite || trimmed.match(/https?:\/\/[^\s]+|[a-z0-9-]+\.(?:com|org|net|io|dev|app)/i)?.[0] || 'target website';
+      return [
+        { id: 1, description: `Navigate to ${site} and inspect login form and security challenges`, status: 'PENDING' },
+        { id: 2, description: 'Fill credentials accurately into detected inputs without leaking secrets', status: 'PENDING' },
+        { id: 3, description: 'Obtain user authorization and submit authentication request', status: 'PENDING' },
+        { id: 4, description: 'Verify login outcome and post-authentication page state', status: 'PENDING' },
+      ];
+    }
+
+    // 6. Detect general or registration form filling requests (e.g. "Open this registration form and fill it using these details")
+    if ((/\b(?:registration\s+form|form|register|sign\s*up)\b/i.test(trimmed) && /\b(?:fill|enter|submit|details)\b/i.test(trimmed)) || /\b(?:fill\s+(?:out\s+)?(?:the\s+)?(?:registration\s+)?form|register|sign\s*up)\b/i.test(trimmed)) {
+      return [
+        { id: 1, description: 'Navigate to target form page and inspect interactive fields', status: 'PENDING' },
+        { id: 2, description: 'Map provided details to inputs, select dropdowns, and checkboxes with verification', status: 'PENDING' },
+        { id: 3, description: 'Present concise summary and request confirmation before consequential submission', status: 'PENDING' },
+        { id: 4, description: 'Submit form and verify submission outcome', status: 'PENDING' },
+      ];
+    }
+
+    // 7. Fallback: single atomic requirement
     return [
       {
         id: 1,

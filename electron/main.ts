@@ -11,6 +11,7 @@ import { TaskManager } from './taskManager';
 import { AgentEngine, AgentEvent } from './agentEngine';
 import { OllamaService } from './ollamaService';
 import { ElevenLabsService } from './elevenLabsService';
+import { CredentialManager } from './credentialStore';
 
 // Standardize application name so userData path is deterministic across dev & packaged builds
 app.setName('nexus-ai');
@@ -670,6 +671,41 @@ ipcMain.handle('conversations:save', async (_event, conversations: any[]) => {
   if (!Array.isArray(conversations)) return { success: false };
   const ok = await writeJsonFile('nexus_conversations.json', conversations);
   return { success: ok };
+});
+
+// ==========================================
+// IPC HANDLERS: SECURE CREDENTIALS & FORMS
+// ==========================================
+ipcMain.handle('credentials:store-session', async (_event, { domain, username, password }: { domain: string; username: string; password: string }) => {
+  try {
+    CredentialManager.getInstance().setSessionCredential(domain, username, password);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || String(err) };
+  }
+});
+
+ipcMain.handle('credentials:get', async (_event, { domain }: { domain: string }) => {
+  const cred = CredentialManager.getInstance().getCredentialForDomain(domain);
+  if (!cred) return null;
+  // Never expose plaintext password to renderer code or logs
+  return {
+    username: cred.username,
+    hasPassword: Boolean(cred.password),
+    source: cred.source,
+  };
+});
+
+ipcMain.handle('credentials:clear', async (_event, { domain }: { domain?: string }) => {
+  CredentialManager.getInstance().clearSession(domain);
+  return { success: true };
+});
+
+ipcMain.handle('browser:inspect-forms', async () => {
+  if (!browserService) {
+    return { success: false, error: 'Browser service not initialized' };
+  }
+  return await browserService.inspectForms();
 });
 
 // App Lifecycle

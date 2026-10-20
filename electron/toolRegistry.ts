@@ -2,6 +2,7 @@ import { BrowserService, BrowserActionResult } from './browserService';
 import { DesktopService, WindowInfo } from './desktopService';
 import { DownloadManager } from './downloadManager';
 import { TaskManager, TaskRecord } from './taskManager';
+import { CredentialManager } from './credentialStore';
 
 export type RiskLevel = 'LOW' | 'MODERATE' | 'HIGHER';
 
@@ -51,17 +52,27 @@ export function isConsequentialAction(text: string): boolean {
 
 export function isSensitiveField(fieldName: string): boolean {
   if (!fieldName) return false;
-  return /\b(password|passwd|otp|pin|cvv|secret|token|credit[-_]?card|ssn)\b/i.test(fieldName);
+  return /password|passwd|pass|otp|pin|cvv|secret|token|credit[-_]?card|ssn|auth/i.test(fieldName);
 }
 
 export function isToolActionConsequential(toolName: string, args: Record<string, any> = {}): boolean {
   const normalizedName = (toolName || '').toLowerCase().replace(/[-_.]+/g, '_');
   
   if (normalizedName === 'task_delete') return true;
+  if (normalizedName === 'browser_login') return true;
 
   if (normalizedName === 'click_control' || normalizedName === 'browser_click') {
     const target = String(args.target || args.selector || args.element || args.selector_or_text || '');
     if (isConsequentialAction(target)) return true;
+  }
+
+  if (normalizedName === 'smart_fill_form') {
+    if (args.submit === true) return true;
+    if (args.fields && typeof args.fields === 'object') {
+      for (const [k, v] of Object.entries(args.fields)) {
+        if (isSensitiveField(k) || isConsequentialAction(String(v))) return true;
+      }
+    }
   }
 
   if (normalizedName === 'fill_form' || normalizedName === 'browser_fill' || normalizedName === 'browser_type') {
@@ -503,6 +514,167 @@ const TOOL_DEFINITIONS: Record<string, ToolDefinition> = {
     },
     handler: async (args, ctx) => {
       return TOOL_DEFINITIONS.fill_form.handler(args, ctx);
+    },
+  },
+
+  // Intelligent Form Inspection
+  browser_inspect_forms: {
+    name: 'browser_inspect_forms',
+    description: 'Inspect forms and interactive elements on the active page. Detects input labels, placeholders, types (email, password, text, select, checkbox, radio), submit buttons, and security challenges (CAPTCHA, MFA/2FA).',
+    riskLevel: 'LOW',
+    parameters: {
+      type: 'OBJECT',
+      properties: {},
+    },
+    handler: async (args, ctx) => {
+      ctx.onEmitEvent('INFO', 'Inspecting page forms and interactive elements...');
+      const res = await ctx.browserService.inspectForms();
+      if (res.detectedChallenge?.hasChallenge) {
+        ctx.onEmitEvent('APPROVAL', `Security challenge detected: ${res.detectedChallenge.details}`);
+      }
+      return res;
+    },
+  },
+
+  // Intelligent Multi-type Form Filling
+  smart_fill_form: {
+    name: 'smart_fill_form',
+    description: 'Fill form fields with intelligent accessible locator detection. Handles text inputs, select dropdowns, checkboxes, and radio buttons. Verifies field values and safely masks secrets. Requests authorization before final submission of consequential forms.',
+    riskLevel: 'MODERATE',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        fields: { type: 'OBJECT', description: 'Map of field labels/names/placeholders to target values' },
+        submit: { type: 'BOOLEAN', description: 'Whether to submit the form after filling (defaults to false)' },
+        submitButtonTextOrSelector: { type: 'STRING', description: 'Optional text or selector for submit button' },
+      },
+      required: ['fields'],
+    },
+    handler: async (args, ctx) => {
+      const fields = (args.fields && typeof args.fields === 'object') ? args.fields : {};
+      const submit = Boolean(args.submit);
+      const submitButtonTextOrSelector = args.submitButtonTextOrSelector ? String(args.submitButtonTextOrSelector) : undefined;
+
+      // Build masked summary for approval and logs
+      const maskedSummary: Record<string, string> = {};
+      for (const [k, v] of Object.entries(fields)) {
+        maskedSummary[k] = isSensitiveField(k) ? '••••••••' : String(v);
+      }
+
+      // Check if submission or sensitive field requires approval
+      const requiresApproval = submit || Object.keys(fields).some((k) => isSensitiveField(k));
+      if (requiresApproval) {
+        const status = await ctx.browserService.getStatus();
+        ctx.onEmitEvent('APPROVAL', `Approval requested before ${submit ? 'submitting' : 'filling'} form on ${status.url}`);
+        const approved = await ctx.onRequestApproval({
+          id: `appr-form-${Date.now()}`,
+          action: `${submit ? 'Submit' : 'Fill'} form with fields: ${Object.keys(fields).join(', ')}`,
+          details: `Target fields: ${JSON.stringify(maskedSummary)}`,
+          targetUrl: status.url || '',
+          isConsequential: true,
+        });
+        if (!approved) {
+          return { success: false, error: 'User declined form submission.' };
+        }
+      }
+
+      ctx.onEmitEvent('FILL', `Filling form fields: ${Object.keys(fields).join(', ')}`);
+      const res = await ctx.browserService.smartFillForm({
+        fields,
+        submit,
+        submitButtonTextOrSelector,
+      });
+
+      ctx.onEmitEvent(
+        res.success ? 'FILL' : 'ERROR',
+        res.success ? (res.content || 'Form fields filled successfully') : (res.error || 'Form filling failed'),
+        undefined,
+        res.url,
+        res.screenshotBase64
+      );
+      return res;
+    },
+  },
+
+  // Authorized Secure Login
+  browser_login: {
+    name: 'browser_login',
+    description: 'Perform authorized, secure login on the current website. Safely acquires credentials, fills username and password, pauses for user approval before submission, and strictly verifies authentication outcome. Never passes passwords to the model or logs.',
+    riskLevel: 'HIGHER',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        username: { type: 'STRING', description: 'Username or email address for login' },
+        password: { type: 'STRING', description: 'Password for login (will be masked and shielded)' },
+        domain: { type: 'STRING', description: 'Optional domain to verify (e.g. example.com)' },
+        submit: { type: 'BOOLEAN', description: 'Whether to submit the login form (defaults to true)' },
+      },
+    },
+    handler: async (args, ctx) => {
+      const status = await ctx.browserService.getStatus();
+      const currentUrl = status.url || '';
+      let username = String(args.username || '').trim();
+      let password = String(args.password || '').trim();
+
+      // Check CredentialManager if credentials not explicitly supplied in args
+      if (!username || !password) {
+        const cred = CredentialManager.getInstance().getCredentialForDomain(currentUrl);
+        if (cred) {
+          if (!username) username = cred.username;
+          if (!password) password = cred.password;
+        }
+      }
+
+      if (!username || !password) {
+        return {
+          success: false,
+          state: 'awaiting_credentials',
+          error: `Credentials required to log in to ${currentUrl}. Please provide username and password.`,
+        };
+      }
+
+      // Pre-flight challenge inspection
+      const challenge = await ctx.browserService.detectSecurityChallenges();
+      if (challenge.hasChallenge) {
+        ctx.onEmitEvent('APPROVAL', `Security challenge detected: ${challenge.details}`);
+        return {
+          success: false,
+          state: 'blocked',
+          error: `Security challenge detected (${challenge.challengeType}): ${challenge.details}. Manual resolution required.`,
+        };
+      }
+
+      // Consequential Action Approval Check: User must approve login action before submission
+      ctx.onEmitEvent('APPROVAL', `Approval requested to log in as "${username}" on ${currentUrl}`);
+      const approved = await ctx.onRequestApproval({
+        id: `appr-login-${Date.now()}`,
+        action: `Log in as user "${username}"`,
+        details: `The agent requests permission to authenticate with user "${username}" on "${currentUrl}". Password is secure and masked.`,
+        targetUrl: currentUrl,
+        isConsequential: true,
+      });
+
+      if (!approved) {
+        return { success: false, state: 'failed', error: `User declined login authorization for "${username}" on ${currentUrl}.` };
+      }
+
+      ctx.onEmitEvent('FILL', `Authenticating as "${username}" on ${currentUrl} (password masked)`);
+      const res = await ctx.browserService.executeLogin({
+        username,
+        password,
+        domain: args.domain,
+        submit: args.submit !== false,
+      });
+
+      ctx.onEmitEvent(
+        res.success ? 'SUCCESS' : 'ERROR',
+        res.success ? `Login succeeded for "${username}" on ${res.url}` : (res.error || 'Login failed'),
+        undefined,
+        res.url,
+        res.screenshotBase64
+      );
+
+      return res;
     },
   },
 
@@ -1264,6 +1436,17 @@ const TOOL_ALIASES: Record<string, string> = {
   show_browser: 'browser_bring_to_front',
   bring_to_front: 'browser_bring_to_front',
   bring_browser_to_front: 'browser_bring_to_front',
+
+  browser_inspect_forms: 'browser_inspect_forms',
+  inspect_forms: 'browser_inspect_forms',
+  forms_inspect: 'browser_inspect_forms',
+
+  smart_fill_form: 'smart_fill_form',
+  smart_fill: 'smart_fill_form',
+
+  browser_login: 'browser_login',
+  login: 'browser_login',
+  auth_login: 'browser_login',
 };
 
 export class ToolDispatcher {
@@ -1274,12 +1457,15 @@ export class ToolDispatcher {
       'search_current_site',
       'web_search',
       'fill_form',
+      'smart_fill_form',
+      'browser_login',
       'click_control',
       'download_result',
       'browser_bring_to_front',
       'browser_read_visible_text',
       'browser_get_page_info',
       'browser_inspect_page',
+      'browser_inspect_forms',
       'browser_select',
       'browser_check',
       'browser_wait',
@@ -1321,11 +1507,14 @@ export class ToolDispatcher {
       'search_current_site',
       'web_search',
       'fill_form',
+      'smart_fill_form',
+      'browser_login',
       'click_control',
       'download_result',
       'browser_read_visible_text',
       'browser_get_page_info',
       'browser_inspect_page',
+      'browser_inspect_forms',
       'browser_select',
       'browser_check',
       'browser_wait',

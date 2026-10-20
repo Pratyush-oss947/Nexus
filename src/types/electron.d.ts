@@ -54,6 +54,12 @@ export interface ElectronAPI {
   onRequestApproval: (callback: (approval: ApprovalRequest) => void) => () => void;
   listDownloads: () => Promise<DownloadItem[]>;
   openDownloadsFolder: () => Promise<void>;
+
+  // Phase 3: Secure Credentials & Form Automation
+  storeSessionCredential?: (domain: string, username: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  getCredentialStatus?: (domain: string) => Promise<{ username: string; hasPassword: boolean; source: string } | null>;
+  clearSessionCredentials?: (domain?: string) => Promise<{ success: boolean }>;
+  inspectPageForms?: () => Promise<any>;
 }
 
 declare global {

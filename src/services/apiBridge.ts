@@ -310,4 +310,33 @@ export const apiBridge = {
       return await window.electronAPI!.openDownloadsFolder();
     }
   },
+
+  // Phase 3: Secure Credentials & Form Automation
+  async storeSessionCredential(domain: string, username: string, password: string): Promise<{ success: boolean; error?: string }> {
+    if (isElectron() && window.electronAPI?.storeSessionCredential) {
+      return await window.electronAPI.storeSessionCredential(domain, username, password);
+    }
+    return { success: true };
+  },
+
+  async getCredentialStatus(domain: string): Promise<{ username: string; hasPassword: boolean; source: string } | null> {
+    if (isElectron() && window.electronAPI?.getCredentialStatus) {
+      return await window.electronAPI.getCredentialStatus(domain);
+    }
+    return null;
+  },
+
+  async clearSessionCredentials(domain?: string): Promise<{ success: boolean }> {
+    if (isElectron() && window.electronAPI?.clearSessionCredentials) {
+      return await window.electronAPI.clearSessionCredentials(domain);
+    }
+    return { success: true };
+  },
+
+  async inspectPageForms(): Promise<any> {
+    if (isElectron() && window.electronAPI?.inspectPageForms) {
+      return await window.electronAPI.inspectPageForms();
+    }
+    return { success: false, error: 'Not running in Electron' };
+  },
 };

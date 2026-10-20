@@ -155,6 +155,12 @@ export interface ElectronAPI {
   getActiveDesktopWindow: () => Promise<any>;
   captureDesktopScreen: () => Promise<any>;
   launchDesktopApp: (appName: string, args?: string) => Promise<any>;
+
+  // Phase 3 Secure Credentials & Form Automation
+  storeSessionCredential: (domain: string, username: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  getCredentialStatus: (domain: string) => Promise<{ username: string; hasPassword: boolean; source: string } | null>;
+  clearSessionCredentials: (domain?: string) => Promise<{ success: boolean }>;
+  inspectPageForms: () => Promise<any>;
 }
 
 const electronAPI: ElectronAPI = {
@@ -231,6 +237,12 @@ const electronAPI: ElectronAPI = {
   getActiveDesktopWindow: () => ipcRenderer.invoke('desktop:get-active-window'),
   captureDesktopScreen: () => ipcRenderer.invoke('desktop:capture-screen'),
   launchDesktopApp: (appName: string, args?: string) => ipcRenderer.invoke('desktop:launch-app', { appName, args }),
+
+  // Phase 3 Secure Credentials & Form Automation
+  storeSessionCredential: (domain: string, username: string, password: string) => ipcRenderer.invoke('credentials:store-session', { domain, username, password }),
+  getCredentialStatus: (domain: string) => ipcRenderer.invoke('credentials:get', { domain }),
+  clearSessionCredentials: (domain?: string) => ipcRenderer.invoke('credentials:clear', { domain }),
+  inspectPageForms: () => ipcRenderer.invoke('browser:inspect-forms'),
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);

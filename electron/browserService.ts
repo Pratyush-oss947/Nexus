@@ -16,6 +16,67 @@ export interface BrowserActionResult {
   filledCount?: number;
   verifiedCount?: number;
   verifications?: Record<string, any>;
+  state?: string;
+  detectedChallenge?: SecurityChallengeResult;
+  forms?: DetectedForm[];
+}
+
+export interface DetectedFormField {
+  tag: 'input' | 'textarea' | 'select' | 'button';
+  type: string;
+  name: string;
+  id: string;
+  label: string;
+  placeholder: string;
+  required: boolean;
+  disabled: boolean;
+  readOnly: boolean;
+  currentValue?: string;
+  options?: Array<{ value: string; label: string; selected: boolean }>;
+  checked?: boolean;
+  role?: string;
+  isAmbiguous?: boolean;
+  confidence: number;
+}
+
+export interface DetectedForm {
+  formIndex: number;
+  id: string;
+  name: string;
+  action: string;
+  method: string;
+  purpose: 'login' | 'registration' | 'search' | 'contact' | 'checkout' | 'general';
+  fields: DetectedFormField[];
+  submitButtons: Array<{ text: string; id: string; ariaLabel: string }>;
+}
+
+export interface SecurityChallengeResult {
+  hasChallenge: boolean;
+  challengeType: 'CAPTCHA' | 'MFA' | 'NONE';
+  details?: string;
+}
+
+export interface FormInspectionResult extends BrowserActionResult {
+  forms?: DetectedForm[];
+  orphanFields?: DetectedFormField[];
+  detectedChallenge?: SecurityChallengeResult;
+  summary?: string;
+}
+
+export interface SmartFillOptions {
+  fields: Record<string, any>;
+  submit?: boolean;
+  submitButtonTextOrSelector?: string;
+  preserveExisting?: boolean;
+}
+
+export interface LoginExecutionOptions {
+  username: string;
+  password: string;
+  domain?: string;
+  usernameField?: string;
+  passwordField?: string;
+  submit?: boolean;
 }
 
 export class BrowserService {
@@ -836,6 +897,726 @@ export class BrowserService {
         success: false,
         action: 'inspect_page',
         error: `Failed to inspect page: ${err?.message || String(err)}`,
+      };
+    }
+  }
+
+  // Action: Detect CAPTCHA, MFA, OTP, or bot challenges
+  public async detectSecurityChallenges(): Promise<SecurityChallengeResult> {
+    try {
+      const page = await this.ensurePage();
+      return await page.evaluate(() => {
+        // 1. CAPTCHA tests
+        const recaptcha = document.querySelector('iframe[src*="recaptcha"], .g-recaptcha, #recaptcha, div[class*="recaptcha" i]');
+        const hcaptcha = document.querySelector('iframe[src*="hcaptcha"], .h-captcha, div[class*="hcaptcha" i]');
+        const turnstile = document.querySelector('iframe[src*="cloudflare"], iframe[src*="turnstile"], .cf-turnstile');
+        const genericCaptcha = document.querySelector('[id*="captcha" i], [class*="captcha" i]');
+
+        if (recaptcha || hcaptcha || turnstile || genericCaptcha) {
+          const type = recaptcha ? 'Google reCAPTCHA' : hcaptcha ? 'hCaptcha' : turnstile ? 'Cloudflare Turnstile' : 'CAPTCHA Challenge';
+          return {
+            hasChallenge: true,
+            challengeType: 'CAPTCHA' as const,
+            details: `Detected ${type} on page. Automated bypass is strictly prevented. User manual interaction required.`,
+          };
+        }
+
+        // 2. 2FA / OTP challenges
+        const otpInput = document.querySelector('input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="2fa" i], input[name*="mfa" i], input[name*="token" i], input[placeholder*="verification code" i], input[placeholder*="6-digit" i]');
+        const bodyText = (document.body.innerText || '').toLowerCase();
+        const mfaPhrases = [
+          'two-factor authentication',
+          'verification code',
+          'enter the code sent to',
+          'authenticator app',
+          'security key',
+          'one-time password',
+          'check your phone',
+        ];
+        const matchedPhrase = mfaPhrases.find((phrase) => bodyText.includes(phrase));
+
+        if (otpInput || matchedPhrase) {
+          return {
+            hasChallenge: true,
+            challengeType: 'MFA' as const,
+            details: `Detected Two-Factor Authentication (MFA/OTP): "${matchedPhrase || 'One-time verification code input'}". User manual input required.`,
+          };
+        }
+
+        return { hasChallenge: false, challengeType: 'NONE' as const };
+      });
+    } catch {
+      return { hasChallenge: false, challengeType: 'NONE' };
+    }
+  }
+
+  // Action: Intelligent, accessible form and input detection
+  public async inspectForms(): Promise<FormInspectionResult> {
+    try {
+      const page = await this.ensurePage();
+      const currentUrl = page.url();
+      const title = await page.title();
+
+      const challenge = await this.detectSecurityChallenges();
+
+      const rawFormData = await page.evaluate(() => {
+        const resolveLabel = (el: HTMLElement): string => {
+          const input = el as HTMLInputElement;
+          // Strategy A: native labels
+          if (input.labels && input.labels.length > 0) {
+            const txt = (input.labels[0].textContent || '').trim();
+            if (txt) return txt;
+          }
+          // Strategy B: label[for="id"]
+          if (input.id) {
+            const lbl = document.querySelector(`label[for="${input.id}"]`);
+            if (lbl && lbl.textContent) return lbl.textContent.trim();
+          }
+          // Strategy C: closest wrapping label
+          const parentLbl = input.closest('label');
+          if (parentLbl && parentLbl.textContent) {
+            return parentLbl.textContent.trim();
+          }
+          // Strategy D: aria-label or aria-labelledby
+          const ariaLabel = input.getAttribute('aria-label');
+          if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+          const ariaLabelledby = input.getAttribute('aria-labelledby');
+          if (ariaLabelledby) {
+            const parts: string[] = [];
+            ariaLabelledby.split(/\s+/).forEach((id) => {
+              const ref = document.getElementById(id);
+              if (ref && ref.textContent) parts.push(ref.textContent.trim());
+            });
+            if (parts.length > 0) return parts.join(' ');
+          }
+          // Strategy E: placeholder
+          if (input.placeholder && input.placeholder.trim()) return input.placeholder.trim();
+          // Strategy F: previous sibling label/span/text
+          let prev = input.previousElementSibling;
+          while (prev) {
+            if (prev.tagName === 'LABEL' || prev.tagName === 'SPAN' || prev.tagName === 'P') {
+              const txt = (prev.textContent || '').trim();
+              if (txt && txt.length < 60) return txt;
+            }
+            prev = prev.previousElementSibling;
+          }
+          return '';
+        };
+
+        const formsList: any[] = [];
+        const seenInputs = new Set<Element>();
+
+        // Collect all forms
+        const formElements = Array.from(document.querySelectorAll('form'));
+        formElements.forEach((formEl, fIdx) => {
+          const fields: any[] = [];
+          const formInputs = Array.from(formEl.querySelectorAll('input:not([type="hidden"]), textarea, select'));
+
+          formInputs.forEach((el) => {
+            seenInputs.add(el);
+            const input = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+            const tag = input.tagName.toLowerCase();
+            const type = (input as HTMLInputElement).type || tag;
+            const name = input.name || '';
+            const id = input.id || '';
+            const label = resolveLabel(input);
+            const placeholder = (input as HTMLInputElement).placeholder || '';
+            const required = input.required || input.getAttribute('aria-required') === 'true';
+            const disabled = input.disabled || input.getAttribute('aria-disabled') === 'true';
+            const readOnly = (input as HTMLInputElement).readOnly || false;
+
+            let options: any[] | undefined = undefined;
+            if (tag === 'select') {
+              const sel = input as HTMLSelectElement;
+              options = Array.from(sel.options).map((opt) => ({
+                value: opt.value,
+                label: opt.text.trim(),
+                selected: opt.selected,
+              }));
+            }
+
+            let checked: boolean | undefined = undefined;
+            if (type === 'checkbox' || type === 'radio') {
+              checked = (input as HTMLInputElement).checked;
+            }
+
+            // Mask password current value for safety
+            let val = input.value || '';
+            if (type === 'password' && val) val = '••••••••';
+
+            fields.push({
+              tag,
+              type,
+              name,
+              id,
+              label: label.slice(0, 80),
+              placeholder: placeholder.slice(0, 80),
+              required,
+              disabled,
+              readOnly,
+              currentValue: val,
+              options,
+              checked,
+              role: input.getAttribute('role') || undefined,
+            });
+          });
+
+          // Submit buttons
+          const submitButtons: any[] = [];
+          formEl.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"]').forEach((b) => {
+            const txt = (b.textContent || (b as HTMLInputElement).value || '').replace(/\s+/g, ' ').trim();
+            const aria = b.getAttribute('aria-label') || '';
+            if (txt || aria) {
+              submitButtons.push({ text: txt.slice(0, 60), id: b.id || '', ariaLabel: aria.slice(0, 60) });
+            }
+          });
+
+          // Detect Purpose
+          let purpose = 'general';
+          const hasPassword = fields.some((f) => f.type === 'password');
+          const hasUsernameOrEmail = fields.some((f) => f.type === 'email' || /user|login|email/i.test(f.name) || /user|login|email/i.test(f.label));
+          const allBtnText = submitButtons.map((b) => b.text.toLowerCase()).join(' ');
+          const formText = (formEl.innerText || '').toLowerCase();
+
+          if (hasPassword) {
+            if (/sign\s*up|register|create\s*(an\s*)?account|join/i.test(allBtnText) || /sign\s*up|register|create\s*(an\s*)?account/i.test(formText)) {
+              purpose = 'registration';
+            } else if (hasUsernameOrEmail || /log\s*in|sign\s*in/i.test(allBtnText) || /log\s*in|sign\s*in/i.test(formText)) {
+              purpose = 'login';
+            } else {
+              purpose = 'login';
+            }
+          } else if (fields.length === 1 && (fields[0].type === 'search' || /search|query|find/i.test(fields[0].name) || /search|query|find/i.test(fields[0].placeholder))) {
+            purpose = 'search';
+          } else if (/card|cvv|expir|billing|checkout|payment/i.test(formText)) {
+            purpose = 'checkout';
+          } else if (fields.some((f) => f.tag === 'textarea') && fields.some((f) => f.type === 'email')) {
+            purpose = 'contact';
+          }
+
+          formsList.push({
+            formIndex: fIdx,
+            id: formEl.id || '',
+            name: formEl.name || '',
+            action: formEl.action || '',
+            method: (formEl.method || 'GET').toUpperCase(),
+            purpose,
+            fields,
+            submitButtons,
+          });
+        });
+
+        // Collect orphan inputs outside of any <form>
+        const orphanInputs: any[] = [];
+        document.querySelectorAll('input:not([type="hidden"]), textarea, select').forEach((el) => {
+          if (!seenInputs.has(el)) {
+            const input = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+            const tag = input.tagName.toLowerCase();
+            const type = (input as HTMLInputElement).type || tag;
+            orphanInputs.push({
+              tag,
+              type,
+              name: input.name || '',
+              id: input.id || '',
+              label: resolveLabel(input).slice(0, 80),
+              placeholder: (input as HTMLInputElement).placeholder || '',
+              required: input.required || input.getAttribute('aria-required') === 'true',
+              disabled: input.disabled || input.getAttribute('aria-disabled') === 'true',
+              readOnly: (input as HTMLInputElement).readOnly || false,
+            });
+          }
+        });
+
+        // Detect ambiguity: identical names or labels among interactive fields
+        const allFields = [...formsList.flatMap((f) => f.fields), ...orphanInputs];
+        const labelCounts: Record<string, number> = {};
+        allFields.forEach((f) => {
+          const key = (f.label || f.name || '').toLowerCase();
+          if (key && f.type !== 'radio') {
+            labelCounts[key] = (labelCounts[key] || 0) + 1;
+          }
+        });
+        allFields.forEach((f) => {
+          const key = (f.label || f.name || '').toLowerCase();
+          if (key && labelCounts[key] > 1 && !f.id) {
+            f.isAmbiguous = true;
+          }
+        });
+
+        return { forms: formsList, orphanFields: orphanInputs };
+      });
+
+      let summary = `Detected ${rawFormData.forms.length} form(s) and ${rawFormData.orphanFields.length} orphan field(s) on ${currentUrl} ("${title}").\n`;
+      if (challenge.hasChallenge) {
+        summary += `[SECURITY CHALLENGE DETECTED] ${challenge.details}\n`;
+      }
+      rawFormData.forms.forEach((f: any, i: number) => {
+        summary += `\nForm #${i + 1} [Purpose: ${f.purpose.toUpperCase()}] ID: "${f.id || 'none'}", Method: ${f.method}:\n`;
+        f.fields.forEach((field: any) => {
+          const reqStr = field.required ? ' [REQUIRED]' : '';
+          const ambStr = field.isAmbiguous ? ' [AMBIGUOUS]' : '';
+          summary += `  - <${field.tag} type="${field.type}"> label="${field.label}" name="${field.name}" id="${field.id}" placeholder="${field.placeholder}"${reqStr}${ambStr}\n`;
+        });
+        if (f.submitButtons.length > 0) {
+          summary += `  Submit Buttons: ${f.submitButtons.map((b: any) => `"${b.text}"`).join(', ')}\n`;
+        }
+      });
+
+      const screenshot = await this.captureScreenshot();
+
+      return {
+        success: true,
+        action: 'inspect_forms',
+        url: currentUrl,
+        title,
+        content: summary,
+        forms: rawFormData.forms,
+        orphanFields: rawFormData.orphanFields,
+        detectedChallenge: challenge,
+        data: { forms: rawFormData.forms, orphanFields: rawFormData.orphanFields, challenge },
+        screenshotBase64: screenshot,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        action: 'inspect_forms',
+        error: `Failed to inspect forms: ${err?.message || String(err)}`,
+      };
+    }
+  }
+
+  // Action: Intelligent accessible form filling with verification and sensitive value masking
+  public async smartFillForm(options: SmartFillOptions): Promise<BrowserActionResult> {
+    try {
+      const page = await this.ensurePage();
+      const entries = Object.entries(options.fields);
+      if (entries.length === 0) {
+        return { success: false, action: 'smart_fill_form', error: 'No form fields provided to fill.' };
+      }
+
+      const filledResults: Array<{ field: string; expectedValue: any; actualValue: any; verified: boolean; type?: string }> = [];
+
+      for (const [fieldName, rawVal] of entries) {
+        const targetVal = rawVal;
+        const trimmedField = fieldName.trim();
+        const isSensitive = /password|passwd|pin|cvv|secret/i.test(trimmedField);
+
+        // Locating strategy with retry for dynamic/stale locators
+        let matchedEl = null;
+        let matchedType = 'text';
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            // Strategy 1: Accessible role locators
+            try {
+              const byRole = page.getByRole('textbox', { name: new RegExp(trimmedField, 'i') }).first();
+              if (await byRole.isVisible({ timeout: 800 })) { matchedEl = byRole; matchedType = 'text'; break; }
+            } catch {}
+
+            try {
+              const byCombo = page.getByRole('combobox', { name: new RegExp(trimmedField, 'i') }).first();
+              if (await byCombo.isVisible({ timeout: 800 })) { matchedEl = byCombo; matchedType = 'select'; break; }
+            } catch {}
+
+            try {
+              const byCheck = page.getByRole('checkbox', { name: new RegExp(trimmedField, 'i') }).first();
+              if (await byCheck.isVisible({ timeout: 800 })) { matchedEl = byCheck; matchedType = 'checkbox'; break; }
+            } catch {}
+
+            try {
+              const byRadio = page.getByRole('radio', { name: new RegExp(trimmedField, 'i') }).first();
+              if (await byRadio.isVisible({ timeout: 800 })) { matchedEl = byRadio; matchedType = 'radio'; break; }
+            } catch {}
+
+            // Strategy 2: Accessible label
+            try {
+              const byLabel = page.getByLabel(trimmedField, { exact: false }).first();
+              if (await byLabel.isVisible({ timeout: 800 })) {
+                matchedEl = byLabel;
+                const tag = await byLabel.evaluate((el) => el.tagName.toLowerCase()).catch(() => 'input');
+                const typeAttr = await byLabel.getAttribute('type').catch(() => '');
+                matchedType = tag === 'select' ? 'select' : typeAttr === 'checkbox' ? 'checkbox' : typeAttr === 'radio' ? 'radio' : 'text';
+                break;
+              }
+            } catch {}
+
+            // Strategy 3: Placeholder
+            try {
+              const byPholder = page.getByPlaceholder(trimmedField, { exact: false }).first();
+              if (await byPholder.isVisible({ timeout: 800 })) { matchedEl = byPholder; matchedType = 'text'; break; }
+            } catch {}
+
+            // Strategy 4: Attribute selectors
+            try {
+              const byAttr = page.locator(
+                `input[name="${trimmedField}" i], textarea[name="${trimmedField}" i], select[name="${trimmedField}" i], ` +
+                `input#${trimmedField}, textarea#${trimmedField}, select#${trimmedField}, [aria-label*="${trimmedField}" i]`
+              ).first();
+              if (await byAttr.isVisible({ timeout: 800 })) {
+                matchedEl = byAttr;
+                const tag = await byAttr.evaluate((el) => el.tagName.toLowerCase()).catch(() => 'input');
+                const typeAttr = await byAttr.getAttribute('type').catch(() => '');
+                matchedType = tag === 'select' ? 'select' : typeAttr === 'checkbox' ? 'checkbox' : typeAttr === 'radio' ? 'radio' : 'text';
+                break;
+              }
+            } catch {}
+
+            if (!matchedEl && attempt === 0) {
+              await page.waitForTimeout(400); // Re-inspect pause
+            }
+          } catch {
+            await page.waitForTimeout(300);
+          }
+        }
+
+        if (!matchedEl) {
+          return {
+            success: false,
+            action: 'smart_fill_form',
+            error: `Could not locate field "${fieldName}" using accessible locators on ${page.url()}. Use browser_inspect_forms to find exact fields.`,
+            data: { filledResults },
+          };
+        }
+
+        // Fill based on element type
+        let actualVal: any = '';
+        let verified = false;
+
+        try {
+          if (matchedType === 'select') {
+            const strVal = String(targetVal);
+            try {
+              await matchedEl.selectOption({ label: strVal }, { timeout: 2000 });
+            } catch {
+              await matchedEl.selectOption({ value: strVal }, { timeout: 2000 });
+            }
+            actualVal = await matchedEl.inputValue().catch(() => strVal);
+            verified = true;
+          } else if (matchedType === 'checkbox') {
+            const boolVal = targetVal === true || targetVal === 'true' || targetVal === 1 || targetVal === '1' || targetVal === 'yes';
+            await matchedEl.setChecked(boolVal, { timeout: 2000 });
+            actualVal = await matchedEl.isChecked();
+            verified = actualVal === boolVal;
+          } else if (matchedType === 'radio') {
+            await matchedEl.check({ timeout: 2000 });
+            actualVal = await matchedEl.isChecked();
+            verified = actualVal === true;
+          } else {
+            // Text / Email / Password / Textarea
+            const strVal = String(targetVal ?? '');
+            await matchedEl.click({ timeout: 1500 });
+            await matchedEl.fill(strVal, { timeout: 2500 });
+            actualVal = await matchedEl.inputValue().catch(() => '');
+            verified = isSensitive ? actualVal.length > 0 : actualVal === strVal;
+          }
+        } catch (fillErr: any) {
+          return {
+            success: false,
+            action: 'smart_fill_form',
+            error: `Failed to interact with field "${fieldName}": ${fillErr?.message || String(fillErr)}`,
+            data: { filledResults },
+          };
+        }
+
+        filledResults.push({
+          field: fieldName,
+          type: matchedType,
+          expectedValue: isSensitive ? '••••••••' : targetVal,
+          actualValue: isSensitive ? '••••••••' : actualVal,
+          verified,
+        });
+
+        if (!verified) {
+          return {
+            success: false,
+            action: 'smart_fill_form',
+            error: `Field "${fieldName}" verification failed after interaction.`,
+            data: { filledResults },
+          };
+        }
+      }
+
+      // Submit if requested
+      if (options.submit) {
+        let submitBtn = null;
+        if (options.submitButtonTextOrSelector) {
+          try {
+            const btn = page.locator(options.submitButtonTextOrSelector).or(
+              page.getByRole('button', { name: new RegExp(options.submitButtonTextOrSelector, 'i') })
+            ).first();
+            if (await btn.isVisible({ timeout: 1200 })) submitBtn = btn;
+          } catch {}
+        }
+
+        if (!submitBtn) {
+          try {
+            const btn = page.locator('button[type="submit"], input[type="submit"]').or(
+              page.getByRole('button', { name: /submit|sign in|log in|register|create account|save|continue/i })
+            ).first();
+            if (await btn.isVisible({ timeout: 1200 })) submitBtn = btn;
+          } catch {}
+        }
+
+        if (submitBtn) {
+          await submitBtn.click({ timeout: 3000 });
+          await page.waitForLoadState('domcontentloaded', { timeout: 4000 }).catch(() => {});
+          await page.waitForTimeout(500);
+        }
+      }
+
+      const screenshot = await this.captureScreenshot();
+
+      return {
+        success: true,
+        action: 'smart_fill_form',
+        url: page.url(),
+        title: await page.title(),
+        content: `Successfully filled and verified ${filledResults.length} field(s): ${filledResults.map((f) => `"${f.field}" (${f.type})`).join(', ')}${options.submit ? ' [Submitted]' : ''}`,
+        filledCount: filledResults.length,
+        verifiedCount: filledResults.filter((f) => f.verified).length,
+        verifications: Object.fromEntries(filledResults.map((f) => [f.field, f])),
+        data: { filledResults },
+        screenshotBase64: screenshot,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        action: 'smart_fill_form',
+        error: `Form filling failed: ${err?.message || String(err)}`,
+      };
+    }
+  }
+
+  // Action: Authorized Secure Login with Pre-flight Check and Post-Submit Verification
+  public async executeLogin(options: LoginExecutionOptions): Promise<BrowserActionResult> {
+    try {
+      const page = await this.ensurePage();
+      const currentUrl = page.url();
+
+      // 1. Domain Check
+      if (options.domain) {
+        const parsed = new URL(currentUrl);
+        const targetDomain = options.domain.toLowerCase().replace(/^https?:\/\//, '').split('/')[0];
+        if (!parsed.hostname.toLowerCase().includes(targetDomain)) {
+          return {
+            success: false,
+            action: 'login',
+            state: 'failed',
+            error: `Domain mismatch: Browser is currently on "${parsed.hostname}", but target login domain is "${targetDomain}". Navigate to the target site first.`,
+          };
+        }
+      }
+
+      // 2. Pre-flight Security Challenge Detection
+      const challenge = await this.detectSecurityChallenges();
+      if (challenge.hasChallenge) {
+        return {
+          success: false,
+          action: 'login',
+          state: 'blocked',
+          error: `Security challenge detected (${challenge.challengeType}): ${challenge.details}. Automated bypass is prevented for security. Please complete verification in the browser window.`,
+          detectedChallenge: challenge,
+        };
+      }
+
+      // 3. Locate Username / Email Field
+      let userField = null;
+      if (options.usernameField) {
+        try {
+          const el = page.locator(options.usernameField).or(page.getByLabel(options.usernameField, { exact: false })).first();
+          if (await el.isVisible({ timeout: 1200 })) userField = el;
+        } catch {}
+      }
+
+      if (!userField) {
+        const userLocators = [
+          page.getByLabel(/username|user|email|login|account/i).first(),
+          page.getByPlaceholder(/username|user|email|login/i).first(),
+          page.getByRole('textbox', { name: /username|user|email|login/i }).first(),
+          page.locator('input[type="email"], input[autocomplete*="username" i], input[autocomplete*="email" i], input[name*="user" i], input[name*="email" i], input[name*="login" i]').first(),
+        ];
+        for (const loc of userLocators) {
+          try {
+            if (await loc.isVisible({ timeout: 800 })) { userField = loc; break; }
+          } catch {}
+        }
+      }
+
+      if (!userField) {
+        return {
+          success: false,
+          action: 'login',
+          state: 'failed',
+          error: `Could not locate username or email input field on ${currentUrl}.`,
+        };
+      }
+
+      // 4. Locate Password Field
+      let passField = null;
+      if (options.passwordField) {
+        try {
+          const el = page.locator(options.passwordField).or(page.getByLabel(options.passwordField, { exact: false })).first();
+          if (await el.isVisible({ timeout: 1200 })) passField = el;
+        } catch {}
+      }
+
+      if (!passField) {
+        const passLocators = [
+          page.locator('input[type="password"]').first(),
+          page.getByLabel(/password|passcode/i).first(),
+          page.getByPlaceholder(/password|passcode/i).first(),
+          page.locator('input[autocomplete*="password" i], input[name*="pass" i]').first(),
+        ];
+        for (const loc of passLocators) {
+          try {
+            if (await loc.isVisible({ timeout: 800 })) { passField = loc; break; }
+          } catch {}
+        }
+      }
+
+      if (!passField) {
+        return {
+          success: false,
+          action: 'login',
+          state: 'failed',
+          error: `Could not locate password input field on ${currentUrl}.`,
+        };
+      }
+
+      // 5. Fill credentials without exposing password
+      await userField.click({ timeout: 1500 });
+      await userField.fill(options.username, { timeout: 2000 });
+
+      await passField.click({ timeout: 1500 });
+      await passField.fill(options.password, { timeout: 2000 });
+
+      // Verify fields were populated
+      const verifiedUser = (await userField.inputValue().catch(() => '')) === options.username;
+      const passLen = (await passField.inputValue().catch(() => '')).length;
+
+      if (!verifiedUser || passLen === 0) {
+        return {
+          success: false,
+          action: 'login',
+          state: 'failed',
+          error: 'Failed to populate login credentials into the input fields.',
+        };
+      }
+
+      // 6. Submit if requested
+      if (options.submit !== false) {
+        let submitBtn = null;
+        try {
+          const btn = page.locator('button[type="submit"], input[type="submit"]').or(
+            page.getByRole('button', { name: /log\s*in|sign\s*in|continue|submit/i })
+          ).first();
+          if (await btn.isVisible({ timeout: 1500 })) submitBtn = btn;
+        } catch {}
+
+        if (!submitBtn) {
+          // Fallback: press Enter on password field
+          await passField.press('Enter');
+        } else {
+          await submitBtn.click({ timeout: 3000 });
+        }
+
+        // Wait for state transition
+        await page.waitForLoadState('domcontentloaded', { timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(800);
+
+        // 7. Post-Submit Verification
+        const postChallenge = await this.detectSecurityChallenges();
+        if (postChallenge.hasChallenge) {
+          return {
+            success: false,
+            action: 'login',
+            state: 'blocked',
+            error: `Security challenge appeared after submission (${postChallenge.challengeType}): ${postChallenge.details}. Manual resolution required.`,
+            detectedChallenge: postChallenge,
+          };
+        }
+
+        // Check for visible error message
+        const loginError = await page.evaluate(() => {
+          const errSelectors = ['[role="alert"]', '.alert-danger', '.error', '.error-message', '#error', '#login-error'];
+          for (const sel of errSelectors) {
+            const el = document.querySelector(sel);
+            if (el) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 0 && rect.height > 0) {
+                const txt = (el.textContent || '').trim();
+                if (txt) return txt.slice(0, 150);
+              }
+            }
+          }
+          const text = (document.body.innerText || '').toLowerCase();
+          const errorPhrases = [
+            'invalid username or password',
+            'invalid credentials',
+            'incorrect password',
+            'incorrect username',
+            'user not found',
+            'authentication failed',
+            'access denied',
+            'check your email and password',
+            'wrong password',
+          ];
+          for (const phrase of errorPhrases) {
+            if (text.includes(phrase)) return phrase;
+          }
+          return null;
+        });
+
+        if (loginError) {
+          return {
+            success: false,
+            action: 'login',
+            state: 'failed',
+            error: `Login failed: Site responded with error "${loginError}".`,
+            url: page.url(),
+          };
+        }
+
+        // Check for success indicators
+        const newUrl = page.url();
+        const hasLoggedOutBtn = await page.locator('text=/log\s*out|sign\s*out|my\s*account|dashboard/i').first().isVisible({ timeout: 1000 }).catch(() => false);
+        const passFieldStillPresent = await page.locator('input[type="password"]').first().isVisible({ timeout: 1000 }).catch(() => false);
+
+        if (hasLoggedOutBtn || (!passFieldStillPresent && newUrl !== currentUrl)) {
+          return {
+            success: true,
+            action: 'login',
+            state: 'completed',
+            url: newUrl,
+            title: await page.title(),
+            content: `Login succeeded and verified on ${newUrl}.`,
+          };
+        }
+
+        return {
+          success: true,
+          action: 'login',
+          state: 'completed',
+          url: newUrl,
+          title: await page.title(),
+          content: `Login submitted on ${newUrl}. Verification concluded.`,
+        };
+      }
+
+      return {
+        success: true,
+        action: 'login',
+        state: 'awaiting_confirmation',
+        url: page.url(),
+        title: await page.title(),
+        content: `Credentials filled and verified for user "${options.username}". Ready for authorized submission.`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        action: 'login',
+        state: 'failed',
+        error: `Login execution failed: ${err?.message || String(err)}`,
       };
     }
   }

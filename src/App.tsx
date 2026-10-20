@@ -429,6 +429,37 @@ export const App: React.FC = () => {
 
         {/* Dynamic View Area */}
         <main className="flex-1 overflow-hidden bg-background relative flex flex-col">
+          {automationState.pendingApproval && (
+            <div className="absolute top-3 left-6 right-6 z-50 p-4 rounded-xl bg-amber-950/90 border border-amber-500/50 shadow-2xl backdrop-blur-md flex items-center justify-between gap-4 animate-in fade-in slide-in-from-top-4 duration-200">
+              <div className="space-y-1">
+                <div className="text-xs font-semibold text-amber-300 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  Action Authorization Required
+                </div>
+                <div className="text-sm font-medium text-text-primary">
+                  {automationState.pendingApproval.action}
+                </div>
+                <div className="text-xs text-text-secondary">
+                  {automationState.pendingApproval.details}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleRespondApproval(automationState.pendingApproval!.id, false)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-background-tertiary hover:bg-background-secondary border border-border-subtle text-text-secondary hover:text-text-primary transition-colors"
+                >
+                  Decline
+                </button>
+                <button
+                  onClick={() => handleRespondApproval(automationState.pendingApproval!.id, true)}
+                  className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-sm transition-colors"
+                >
+                  Authorize & Proceed
+                </button>
+              </div>
+            </div>
+          )}
+
           {currentTab === 'new-task' && (
             <NewTaskView
               onStartAiTask={handleStartAiTask}
