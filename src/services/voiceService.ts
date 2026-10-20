@@ -119,18 +119,57 @@ export class VoiceService {
    * Sanitizes markdown text for speech synthesis fallback.
    */
   private cleanTextForSpeech(text: string): string {
-    return text
-      .replace(/```[\s\S]*?```/g, ' ')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/!\[([^\]]*)\]\([^)]+\)/g, '')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-      .replace(/https?:\/\/[^\s)]+/g, 'link')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/^[\s]*[#*>\-+]+[\s]+/gm, ' ')
-      .replace(/[*_~]{1,3}([^*_~]+)[*_~]{1,3}/g, '$1')
-      .replace(/[\r\n\t]+/g, ' ')
-      .replace(/\s{2,}/g, ' ')
-      .trim();
+    if (!text || typeof text !== 'string') return '';
+
+    let cleaned = text;
+
+    // 1. Remove fenced code blocks completely
+    cleaned = cleaned.replace(/```[\s\S]*?```/g, ' ');
+
+    // 2. Remove technical execution metadata and status tags
+    cleaned = cleaned.replace(/Consulted Sources:\s*\[[\s\S]*?\]/gi, ' ');
+    cleaned = cleaned.replace(/Executed Steps:\s*[^\r\n]+/gi, ' ');
+    cleaned = cleaned.replace(/Task (completed successfully|execution summary):/gi, ' ');
+    cleaned = cleaned.replace(/Blocker:\s*[^\r\n]+/gi, ' ');
+    cleaned = cleaned.replace(/\[(COMPLETED|VERIFIED|FAILED|BLOCKED|INCOMPLETE)\]/gi, ' ');
+    cleaned = cleaned.replace(/^\s*\d+\.\s*\*\*.*?\*\*/gm, ' ');
+
+    // 3. Remove inline code backticks, keeping the word
+    cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
+
+    // 4. Remove image markdown ![]()
+    cleaned = cleaned.replace(/!\[([^\]]*)\]\([^)]+\)/g, '');
+
+    // 5. Convert markdown links [Label](url) -> Label
+    cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+
+    // 6. Convert standalone URLs to just their domain name (e.g. https://www.google.com -> google.com)
+    cleaned = cleaned.replace(/https?:\/\/(?:www\.)?([a-zA-Z0-9.-]+)(?:\/[^\s)\]]*)?/gi, '$1');
+
+    // 7. Remove HTML tags
+    cleaned = cleaned.replace(/<[^>]+>/g, ' ');
+
+    // 8. Replace arrows -> or => with natural speech pause
+    cleaned = cleaned.replace(/->|=>/g, ', then ');
+
+    // 9. Remove emojis to avoid robotic reading of descriptions
+    cleaned = cleaned.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, ' ');
+
+    // 10. Remove markdown headers, list markers, decorators (*, **, _, __, ~, |, #)
+    cleaned = cleaned.replace(/^[\s]*[#*>\-+]+[\s]+/gm, ' ');
+    cleaned = cleaned.replace(/[*_~]{1,3}([^*_~]+)[*_~]{1,3}/g, '$1');
+    cleaned = cleaned.replace(/[`*#~|_\[\]{}]/g, ' ');
+
+    // 11. Normalize whitespace and newlines
+    cleaned = cleaned.replace(/[\r\n\t]+/g, ' ');
+    cleaned = cleaned.replace(/\s{2,}/g, ' ');
+    cleaned = cleaned.trim();
+
+    if (!cleaned) {
+      return 'Task execution finished.';
+    }
+
+    return cleaned;
   }
 
   private speakWithWebSpeechFallback(text: string, generationId: number, messageId: string): Promise<boolean> {
@@ -263,6 +302,21 @@ export class VoiceService {
     }
   }
 
+  private base64ToBlob(base64: string, mimeType: string = 'audio/mpeg'): Blob {
+    try {
+      const binaryString = window.atob(base64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return new Blob([bytes], { type: mimeType });
+    } catch (err) {
+      console.warn('[NEXUS Voice] Failed to decode base64 audio to Blob:', err);
+      return new Blob([], { type: mimeType });
+    }
+  }
+
   private async playAudioChunks(
     chunks: Array<{ audioBase64: string; mimeType: string }>,
     generationId: number,
@@ -274,10 +328,20 @@ export class VoiceService {
       }
 
       const chunk = chunks[i];
-      const audioUrl = `data:${chunk.mimeType || 'audio/mpeg'};base64,${chunk.audioBase64}`;
+      let objectUrl: string | null = null;
+      try {
+        const blob = this.base64ToBlob(chunk.audioBase64, chunk.mimeType || 'audio/mpeg');
+        if (blob.size === 0) continue;
+        objectUrl = URL.createObjectURL(blob);
+      } catch {
+        objectUrl = `data:${chunk.mimeType || 'audio/mpeg'};base64,${chunk.audioBase64}`;
+      }
+
+      const currentUrl = objectUrl;
 
       await new Promise<void>((resolve) => {
         if (generationId !== this.playbackGenerationId) {
+          if (currentUrl.startsWith('blob:')) URL.revokeObjectURL(currentUrl);
           resolve();
           return;
         }
@@ -285,32 +349,34 @@ export class VoiceService {
         const audio = new Audio();
         this.currentAudioElement = audio;
 
-        audio.onended = () => {
+        const cleanup = () => {
           if (this.currentAudioElement === audio) {
             this.currentAudioElement = null;
           }
-          // Release memory
+          if (currentUrl.startsWith('blob:')) {
+            try {
+              URL.revokeObjectURL(currentUrl);
+            } catch {}
+          }
           audio.removeAttribute('src');
           audio.load();
+        };
+
+        audio.onended = () => {
+          cleanup();
           resolve();
         };
 
         audio.onerror = (e) => {
           console.warn('[NEXUS Voice] Audio chunk error:', e);
-          if (this.currentAudioElement === audio) {
-            this.currentAudioElement = null;
-          }
-          audio.removeAttribute('src');
-          audio.load();
+          cleanup();
           resolve();
         };
 
-        audio.src = audioUrl;
+        audio.src = currentUrl;
         audio.play().catch((playErr) => {
           console.warn('[NEXUS Voice] Autoplay or playback prevented:', playErr);
-          if (this.currentAudioElement === audio) {
-            this.currentAudioElement = null;
-          }
+          cleanup();
           resolve();
         });
       });

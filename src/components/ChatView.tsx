@@ -7,9 +7,7 @@ import {
   Copy, 
   Check, 
   AlertCircle, 
-  Bot, 
   User, 
-  Sparkles, 
   Key, 
   CheckCircle2, 
   ArrowRight,
@@ -22,6 +20,7 @@ import {
 import { ChatMessage, GeminiStatus } from '../types';
 import { MarkdownView } from './MarkdownView';
 import { voiceService, VoiceState } from '../services/voiceService';
+import nexusAvatar from '../assets/nexus-avatar.png';
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -113,18 +112,25 @@ export const ChatView: React.FC<ChatViewProps> = ({
     <div className="h-full flex flex-col w-full overflow-hidden bg-background">
       {/* Top Conversation Header */}
       <header className="px-6 py-3.5 border-b border-border-subtle bg-background-secondary/40 flex items-center justify-between shrink-0 select-none">
-        <div className="flex items-center gap-2.5">
-          <div className="w-6 h-6 rounded-md bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-            <Sparkles className="w-3.5 h-3.5" />
+        <div className="flex items-center gap-3">
+          <div className="relative w-8 h-8 rounded-full ring-2 ring-cyan-500/40 overflow-hidden bg-background-tertiary shrink-0 shadow-sm shadow-cyan-500/20">
+            <img src={nexusAvatar} alt="NEXUS AI Avatar" className="w-full h-full object-cover" />
+            {voiceState.isSpeaking && (
+              <span className="absolute inset-0 rounded-full border-2 border-cyan-400 animate-ping opacity-75 pointer-events-none" />
+            )}
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h2 className="text-xs font-semibold text-text-primary tracking-wide">
-                NEXUS Conversation
+                NEXUS AI
               </h2>
               <span className="text-[10px] px-1.5 py-0.2 rounded font-mono bg-background-tertiary border border-border-subtle text-text-muted">
                 {geminiStatus?.defaultModel || 'gemini-2.5-flash'}
               </span>
+            </div>
+            <div className="text-[10px] text-text-muted flex items-center gap-1.5 mt-0.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${voiceState.isSpeaking ? 'bg-cyan-400 animate-pulse' : voiceState.isEnabled ? 'bg-emerald-400' : 'bg-text-dim'}`} />
+              <span>{voiceState.isSpeaking ? 'Speaking...' : voiceState.isEnabled ? 'Voice Mode Active' : 'Voice Muted'}</span>
             </div>
           </div>
         </div>
@@ -256,14 +262,17 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {messages.length === 0 ? (
           /* Empty Chat Prompt State */
           <div className="h-full flex flex-col items-center justify-center max-w-md mx-auto text-center my-auto py-12">
-            <div className="w-12 h-12 rounded-2xl bg-background-tertiary border border-border-subtle flex items-center justify-center text-text-muted mb-4 shadow-sm">
-              <Bot className="w-6 h-6 text-blue-400" />
+            <div className="relative w-20 h-20 rounded-full p-0.5 bg-gradient-to-tr from-cyan-500 via-blue-500 to-indigo-600 shadow-xl shadow-cyan-500/25 mb-4 animate-in zoom-in-95 duration-200">
+              <img src={nexusAvatar} alt="NEXUS AI" className="w-full h-full rounded-full object-cover ring-2 ring-black/40" />
+              {voiceState.isSpeaking && (
+                <span className="absolute inset-0 rounded-full border-2 border-cyan-400 animate-ping opacity-75" />
+              )}
             </div>
             <h3 className="text-sm font-semibold text-text-primary mb-1">
-              Active Conversation
+              NEXUS Autonomous Intelligence
             </h3>
             <p className="text-xs text-text-muted leading-relaxed max-w-sm mb-4">
-              Ask questions, brainstorm solutions, analyze code, or structure tasks in English or Hinglish.
+              Ask questions, execute browser automations, or speak with NEXUS using your custom ElevenLabs AI voice.
             </p>
             <div className="flex items-center gap-2 text-[11px] text-text-dim">
               <span>Enter to send</span>
@@ -284,8 +293,11 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 }`}
               >
                 {!isUser && (
-                  <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400 shrink-0 mt-0.5">
-                    <Bot className="w-4 h-4" />
+                  <div className="relative w-8 h-8 rounded-full ring-2 ring-cyan-500/30 overflow-hidden shrink-0 mt-0.5 bg-background-tertiary select-none shadow-sm">
+                    <img src={nexusAvatar} alt="NEXUS AI" className="w-full h-full object-cover" />
+                    {voiceState.isSpeaking && voiceState.activeMessageId === msg.id && (
+                      <span className="absolute inset-0 rounded-full border-2 border-cyan-400 animate-ping opacity-75 pointer-events-none" />
+                    )}
                   </div>
                 )}
 
@@ -436,14 +448,14 @@ export const ChatView: React.FC<ChatViewProps> = ({
         {/* Live Loading Indicator while Gemini is thinking */}
         {isGenerating && (
           <div className="flex gap-3.5 max-w-3xl mx-auto w-full justify-start animate-in fade-in duration-150">
-            <div className="w-7 h-7 rounded-lg bg-blue-500/10 border border-blue-500/25 flex items-center justify-center text-blue-400 shrink-0 mt-0.5">
-              <Bot className="w-4 h-4 animate-pulse" />
+            <div className="relative w-8 h-8 rounded-full ring-2 ring-cyan-500/40 overflow-hidden shrink-0 mt-0.5 bg-background-tertiary select-none shadow-sm animate-pulse">
+              <img src={nexusAvatar} alt="Thinking..." className="w-full h-full object-cover" />
             </div>
             <div className="bg-background-secondary border border-border-subtle rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-3 text-xs text-text-secondary shadow-sm">
               <span className="flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0ms' }}></span>
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '150ms' }}></span>
-                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '300ms' }}></span>
               </span>
               <span className="text-[11px] text-text-muted">NEXUS is formulating response...</span>
               <button
@@ -478,8 +490,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
             />
 
             <div className="flex items-center justify-between pt-2 border-t border-border-subtle/50 mt-1 select-none text-[11px]">
-              <div className="text-text-dim text-[10px]">
+              <div className="flex items-center gap-3 text-text-dim text-[10px]">
                 <span>Shift + Return for newline</span>
+                <span>•</span>
+                <button
+                  type="button"
+                  onClick={() => voiceService.toggle()}
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border transition-colors ${
+                    voiceState.isEnabled
+                      ? 'bg-blue-500/15 border-blue-500/30 text-blue-400'
+                      : 'bg-background-tertiary border-border-subtle text-text-muted hover:text-text-secondary'
+                  }`}
+                  title={voiceState.isEnabled ? 'Voice is ON: Responses spoken aloud' : 'Voice is OFF: Text only'}
+                >
+                  {voiceState.isEnabled ? (
+                    <Volume2 className="w-3 h-3 text-blue-400" />
+                  ) : (
+                    <VolumeX className="w-3 h-3 text-text-dim" />
+                  )}
+                  <span>Voice {voiceState.isEnabled ? 'ON' : 'OFF'}</span>
+                </button>
               </div>
 
               <div className="flex items-center gap-2">

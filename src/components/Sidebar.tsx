@@ -1,5 +1,6 @@
 import React from 'react';
 import nexusLogo from '../assets/nexus-logo.png';
+import nexusAvatar from '../assets/nexus-avatar.png';
 import { 
   PlusCircle, 
   MessageSquare,
@@ -7,7 +8,6 @@ import {
   ListTodo, 
   FolderGit2, 
   Settings, 
-  Activity,
   Volume2
 } from 'lucide-react';
 import { NavigationTab, GeminiStatus } from '../types';
@@ -147,43 +147,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </nav>
       </div>
 
-      {/* Bottom Section: Application Status Indicator */}
+      {/* Bottom Section: Application & AI Avatar Status */}
       <div className="p-3 border-t border-border-subtle">
-        <div className="px-3 py-2.5 rounded-lg bg-background-tertiary border border-border-subtle">
-          <div className="flex items-center justify-between mb-1">
-            <div className="flex items-center gap-1.5">
-              <span className="relative flex h-2 w-2">
-                <span
-                  className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                    isAutomationRunning
-                      ? 'bg-blue-400'
-                      : geminiStatus?.hasApiKey
-                      ? 'bg-emerald-400'
-                      : 'bg-amber-400'
-                  }`}
-                ></span>
-                <span
-                  className={`relative inline-flex rounded-full h-2 w-2 ${
-                    isAutomationRunning
-                      ? 'bg-blue-500'
-                      : geminiStatus?.hasApiKey
-                      ? 'bg-emerald-500'
-                      : 'bg-amber-500'
-                  }`}
-                ></span>
-              </span>
-              <span className="text-[11px] font-medium text-text-primary">
-                {isAutomationRunning
-                  ? 'Browser Active'
-                  : geminiStatus?.hasApiKey
-                  ? 'Neural Engine Live'
-                  : 'Setup Required'}
-              </span>
+        <div className="px-3 py-2.5 rounded-xl bg-background-tertiary border border-border-subtle space-y-2.5">
+          {/* AI Avatar Card */}
+          <div className="flex items-center gap-2.5">
+            <div className="relative w-8 h-8 rounded-full ring-2 ring-cyan-500/35 overflow-hidden shrink-0 bg-black/40 shadow-sm shadow-cyan-500/20">
+              <img src={nexusAvatar} alt="NEXUS AI Avatar" className="w-full h-full object-cover" />
+              {voiceState.isSpeaking && (
+                <span className="absolute inset-0 rounded-full border-2 border-cyan-400 animate-ping opacity-75 pointer-events-none" />
+              )}
             </div>
-            <Activity className="w-3 h-3 text-text-muted" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold text-text-primary truncate">NEXUS AI Core</div>
+              <div className="text-[10px] text-text-muted flex items-center gap-1.5 mt-0.5">
+                <span className={`w-1.5 h-1.5 rounded-full ${voiceState.isSpeaking ? 'bg-cyan-400 animate-pulse' : voiceState.isEnabled ? 'bg-emerald-400' : 'bg-text-dim'}`} />
+                <span className="truncate">{voiceState.isSpeaking ? 'Speaking...' : voiceState.isEnabled ? 'Voice Mode Active' : 'Voice Muted'}</span>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center justify-between text-[10px] text-text-dim">
-            <span>Shell v0.3.0</span>
+
+          <div className="flex items-center justify-between text-[10px] text-text-dim pt-2 border-t border-border-subtle/50">
+            <span className="flex items-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${isAutomationRunning ? 'bg-blue-400 animate-ping' : geminiStatus?.hasApiKey ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+              <span className="text-text-secondary">{isAutomationRunning ? 'Browser Active' : geminiStatus?.hasApiKey ? 'Neural Engine Live' : 'Setup Required'}</span>
+            </span>
             <span className="text-emerald-500/90 font-mono">
               {isAutomationRunning ? 'Automating' : 'Sandboxed'}
             </span>
@@ -193,14 +181,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             type="button"
             onClick={() => voiceService.toggle()}
-            className="w-full flex items-center justify-between text-[10px] mt-2 pt-2 border-t border-border-subtle/50 hover:bg-white/[0.03] rounded px-1 py-0.5 transition-colors"
+            className="w-full flex items-center justify-between text-[10px] pt-1.5 border-t border-border-subtle/50 hover:bg-white/[0.04] rounded px-1.5 py-1 transition-colors"
             title="Click to toggle ElevenLabs Voice AI"
           >
             <span className="flex items-center gap-1.5 text-text-secondary">
-              <Volume2 className={`w-3 h-3 ${voiceState.isEnabled ? 'text-blue-400' : 'text-text-muted'}`} />
-              <span>Voice AI</span>
+              <Volume2 className={`w-3.5 h-3.5 ${voiceState.isEnabled ? 'text-blue-400' : 'text-text-muted'}`} />
+              <span>Voice AI Output</span>
             </span>
-            <span className={`font-mono text-[9px] px-1.5 py-0.2 rounded ${
+            <span className={`font-mono text-[9px] px-1.5 py-0.5 rounded font-medium ${
               voiceState.isEnabled 
                 ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
                 : 'bg-background-secondary text-text-muted border border-border-subtle'

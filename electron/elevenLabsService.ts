@@ -82,42 +82,57 @@ export class ElevenLabsService {
     // 1. Remove fenced code blocks completely (reading raw code aloud is noisy)
     cleaned = cleaned.replace(/```[\s\S]*?```/g, ' ');
 
-    // 2. Remove inline code backticks, keeping the word
+    // 2. Remove technical execution metadata, status tags, and requirement labels
+    cleaned = cleaned.replace(/Consulted Sources:\s*\[[\s\S]*?\]/gi, ' ');
+    cleaned = cleaned.replace(/Executed Steps:\s*[^\r\n]+/gi, ' ');
+    cleaned = cleaned.replace(/Task (completed successfully|execution summary):/gi, ' ');
+    cleaned = cleaned.replace(/Blocker:\s*[^\r\n]+/gi, ' ');
+    cleaned = cleaned.replace(/\[(COMPLETED|VERIFIED|FAILED|BLOCKED|INCOMPLETE)\]/gi, ' ');
+    cleaned = cleaned.replace(/^\s*\d+\.\s*\*\*.*?\*\*/gm, ' ');
+
+    // 3. Remove inline code backticks, keeping the word
     cleaned = cleaned.replace(/`([^`]+)`/g, '$1');
 
-    // 3. Remove image markdown ![]()
+    // 4. Remove image markdown ![]()
     cleaned = cleaned.replace(/!\[([^\]]*)\]\([^)]+\)/g, '');
 
-    // 4. Convert markdown links [text](url) -> text
+    // 5. Convert markdown links [Label](url) -> Label
     cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
 
-    // 5. Remove raw URLs
-    cleaned = cleaned.replace(/https?:\/\/[^\s)]+/g, 'link');
+    // 6. Convert standalone URLs to just their domain name (e.g. https://www.google.com -> google.com)
+    cleaned = cleaned.replace(/https?:\/\/(?:www\.)?([a-zA-Z0-9.-]+)(?:\/[^\s)\]]*)?/gi, '$1');
 
-    // 6. Remove HTML tags if any
+    // 7. Remove HTML tags if any
     cleaned = cleaned.replace(/<[^>]+>/g, ' ');
 
-    // 7. Remove markdown headers, list markers, blockquotes
+    // 8. Replace arrows -> or => with natural speech pause
+    cleaned = cleaned.replace(/->|=>/g, ', then ');
+
+    // 9. Remove emojis to avoid robotic reading of descriptions
+    cleaned = cleaned.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, ' ');
+
+    // 10. Remove markdown headers, list markers, decorators (*, **, _, __, ~, |, #)
     cleaned = cleaned.replace(/^[\s]*[#*>\-+]+[\s]+/gm, ' ');
-
-    // 8. Remove bold, italic, strikethrough decorators (*, **, _, __, ~~)
     cleaned = cleaned.replace(/[*_~]{1,3}([^*_~]+)[*_~]{1,3}/g, '$1');
+    cleaned = cleaned.replace(/[`*#~|_\[\]{}]/g, ' ');
 
-    // 9. Clean table formatting symbols |
-    cleaned = cleaned.replace(/\|/g, ' ');
-
-    // 10. Replace multiple consecutive whitespace or newlines with a single space
+    // 11. Normalize whitespace and newlines
     cleaned = cleaned.replace(/[\r\n\t]+/g, ' ');
     cleaned = cleaned.replace(/\s{2,}/g, ' ');
+    cleaned = cleaned.trim();
 
-    return cleaned.trim();
+    if (!cleaned) {
+      return 'Task execution finished.';
+    }
+
+    return cleaned;
   }
 
   /**
    * Splits long text into sensible chunks at sentence boundaries
    * (supporting English punctuation and Hindi purna viram ।).
    */
-  public splitTextIntoChunks(text: string, maxChunkLength = 400): string[] {
+  public splitTextIntoChunks(text: string, maxChunkLength = 2500): string[] {
     const cleaned = this.cleanTextForSpeech(text);
     if (!cleaned) return [];
     if (cleaned.length <= maxChunkLength) return [cleaned];
