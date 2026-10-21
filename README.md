@@ -61,8 +61,7 @@ cp .env.example .env
 ```
 Edit `.env` and set:
 ```ini
-GEMINI_API_KEY=AIzaSyYourActualKeyHere
-GEMINI_MODEL=gemini-2.5-flash
+
 ```
 
 Option B: Launch the app and enter the key in **Settings > Gemini Intelligence > Enter / Override Gemini API Key**, then click **Save Key** and **Test Connection**.
