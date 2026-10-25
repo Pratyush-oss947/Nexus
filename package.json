@@ -27,32 +27,9 @@
       "output": "release"
     },
     "files": [
-      "dist/**/*",
-      "dist-electron/**/*",
+      "README.md",
       "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "dist-electron/nexus-desktop-helper.exe",
-        "to": "nexus-desktop-helper.exe"
-      }
-    ],
-    "asarUnpack": [
-      "**/nexus-desktop-helper.exe"
-    ],
-    "win": {
-      "icon": "build/icon.ico",
-      "target": [
-        "nsis",
-        "portable"
-      ],
-      "executableName": "NEXUS-AI"
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true
-    }
+    ]
   },
   "dependencies": {
     "@google/genai": "^2.30.0",
@@ -70,7 +47,7 @@
     "@vitejs/plugin-react": "^4.3.2",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.0.1",
-    "cross-env": "^7.0.3",
+    "cross-env": "^0.0.0",
     "electron": "^32.2.0",
     "electron-builder": "^26.15.3",
     "postcss": "^8.4.47",
